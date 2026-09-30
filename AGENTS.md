@@ -1,12 +1,7 @@
-# ChatGPT project context
+# Tally project instructions
 
-This directory is a local mirror of the ChatGPT project “tally”.
+This is the standalone Tally project root at `~/Documents/tally`.
 
-- Treat every file under `sources/` as read-only reference material.
-- Do not edit, rename, move, or delete synced project files.
-- These files may be replaced the next time a task is created from this ChatGPT project.
-
-
-## Project instructions
-
-This project has no custom instructions.
+- Treat files under `sources/` as read-only reference material.
+- Keep `docs/PROGRESS.md` accurate as phases advance.
+- Do not claim production readiness or regulatory certification; this is a synthetic simulation.
