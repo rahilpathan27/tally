@@ -18,6 +18,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from libs.common.object_store import S3ObjectStore
 from libs.idempotency.store import PostgresIdempotencyStore
 from libs.security.key_encryption import ApiKeyCipher
 from libs.security.rate_limit import MerchantRateLimiter
@@ -26,6 +27,12 @@ from redis.asyncio import Redis
 from services.api_gateway.auth import MerchantHmacAuth, MerchantPrincipal
 from services.api_gateway.route import GatewayRoute, requires_scope
 from services.core.faults import fault_point
+from services.core.money_routes import (
+    configure_money_services,
+    internal_router,
+    merchant_router,
+    run_money_workers,
+)
 from services.core.recovery import CircuitBreaker
 from services.core.recovery_worker import (
     _validate_ledger_response,
@@ -35,6 +42,7 @@ from services.core.recovery_worker import (
 from services.core.repository import PaymentIntentRepository
 from services.core.schemas import ConfirmResponse, CreatePaymentIntent, PaymentIntentResponse
 from services.core.state_machine import PaymentState
+from services.core.webhooks import KafkaPublisher
 
 __all__ = [
     "PaymentIntentRepository",
@@ -124,8 +132,32 @@ def create_app() -> FastAPI:
         app.state.recovery_key = os.environ.get("TALLY_RECOVERY_KEY", "")
         app.state.bank_breaker = CircuitBreaker()
         app.state.card_network_breaker = CircuitBreaker()
+        object_store: object | None = None
+        if os.environ.get("TALLY_S3_ENDPOINT"):
+            object_store = S3ObjectStore(
+                os.environ.get("TALLY_S3_BUCKET", "tally-local"),
+                endpoint_url=os.environ["TALLY_S3_ENDPOINT"],
+                access_key=os.environ.get("TALLY_S3_ACCESS_KEY", "local"),
+                secret_key=os.environ.get("TALLY_S3_SECRET_KEY", "local"),
+            )
+        publisher: KafkaPublisher | None = None
+        if os.environ.get("TALLY_KAFKA_BOOTSTRAP"):
+            publisher = KafkaPublisher(os.environ["TALLY_KAFKA_BOOTSTRAP"])
+        configure_money_services(
+            app.state,
+            pool=pool,
+            cipher=cipher,
+            object_store=object_store,
+            event_publisher=publisher,
+            trusted_webhook_hosts=tuple(
+                host
+                for host in os.environ.get("TALLY_WEBHOOK_TRUSTED_HOSTS", "").split(",")
+                if host
+            ),
+        )
 
         async def recovery_loop() -> None:
+            cycles = 0
             while True:
                 try:
                     await process_recovery_batch(
@@ -139,6 +171,9 @@ def create_app() -> FastAPI:
                     await sweep_stalled_payments(
                         app.state.payment_repository, app.state.ledger_http
                     )
+                    # Settlement scheduling is idempotent; checking once a minute is enough.
+                    await run_money_workers(app.state, settle=cycles % 60 == 0)
+                    cycles += 1
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -158,6 +193,9 @@ def create_app() -> FastAPI:
             await app.state.bank_http.aclose()
             await app.state.payer_psp_http.aclose()
             await app.state.card_network_http.aclose()
+            await app.state.webhook_dispatcher.http.aclose()
+            if publisher is not None:
+                await publisher.close()
             await redis.aclose()
             await pool.close()
 
@@ -197,6 +235,8 @@ def create_app() -> FastAPI:
         )
         return {"processed": processed}
 
+    app.include_router(internal_router)
+    app.include_router(merchant_router)
     app.router.route_class = GatewayRoute
 
     @app.post(

@@ -17,6 +17,7 @@
 - Phase 7 failure-injection harness: a fixed-seed chaos simulator injects pre-commit drops, lost acknowledgements, duplicate deliveries, and repeated hold capture/void requests. An independent checker validates the journal hash chain, per-currency balance, hold references, and non-negative posted/available balances after every scenario.
 - Phase 1–7 review fixes: stalled-payment sweeper for crash windows (`authorizing`, `capturing`, `cancelled` with pending void), ledger-first recovery (`GET /v1/entries/by-key`, `/v1/holds/by-key`), idempotency release on 5xx plus a 60-second reservation lease, named crash points (`services/core/faults.py`), an in-process service stack (`chaos/stack.py`) and the full-flow chaos harness (`chaos/flow_sim.py`). A generic migration runner (`scripts/migrate.py`) replaces the per-version Makefile blocks.
 - Ledger additions: platform chart migration (refund clearing, eight fee-income shards, GST payable), per-merchant payable/reserve/payout-in-transit/receivable provisioning, trial balance, statements, entry drill-down, balance as-of, snapshots with recomputation, and an integrity report endpoint.
+- Phase 8 money movement: full/partial refunds with over-refund protection, bank retries and escalation; chargebacks with evidence upload (object storage, SHA-256), win/loss handling and risk labels; T+N IST settlement with Decimal fee/GST/reserve computation, receivable recovery, sharded fee income, payout instruction files and payouts with return handling; outbox relay to Kafka and SSRF-safe signed webhooks with delivery logs, retries, redelivery and test sends. Balance-dependent operations run under a per-merchant advisory lock and replay crashed commands (ADR-012).
 - Added ADRs 001–009 covering money, ledger locking and reservations, local object storage, tokenization, and payment orchestration, alongside ledger design and guarantees documentation.
 
 ## Verified
@@ -41,16 +42,18 @@
 
 - Review-fix verification: `tests/integration/test_crash_recovery.py` crashes the orchestrator at every payment step boundary (visible and hidden external status) and passes; gateway tests cover 5xx release, 4xx replay and stale-lease takeover; full-flow chaos passed 5,000 scenarios on each of two seeds (see [chaos report](chaos-report.md)).
 
+- Phase 8 verification: `make stack-test-integration` runs the money-movement suite on fresh databases (refund storm, escalation and cancel, settlement arithmetic vs ledger balances, idempotent settlement re-run, payout and return, refund-after-settlement receivable recovery, dispute win, signed webhook delivery/retry/redelivery), crash replay for refunds and settlements, and Kafka publication through Redpanda. Property tests prove settlement netting conserves payable for arbitrary inputs.
+
 ## Known gaps
 
 - The local FastAPI ledger API connects using the Compose superuser, binds to loopback, and has no network authentication; the app role remains a database role template rather than the API's runtime identity.
 - Phase 6 routing follows registered VPA bank IDs and deliberately does not fail over to a different bank. Circuit breakers are process-local; simulator status and idempotency data are also process-local.
-- The outbox is transactionally persisted but has no Redpanda publisher/dispatcher. Simulator idempotency result caches are process-local and are lost on restart. Core and ledger local apps use the Compose database superuser; merchant VPA ownership, payment limits/velocity checks, and live rails are not implemented.
+- Simulator idempotency result caches are process-local and are lost on restart. Core and ledger local apps use the Compose database superuser; merchant VPA ownership, payment limits/velocity checks, and live rails are not implemented.
 - Gateway keys use local AES-GCM with a separately managed 32-byte key, not production KMS. Expired rows can be cleaned with `make gateway-cleanup`, but no scheduled cleanup worker exists. The internal ledger API remains separate and loopback-only.
 - Vault encryption currently uses a locally supplied AES-GCM KEK, and simulator identity uses a local shared credential rather than mTLS. No production KMS, certificate identity, key lifecycle, external audit anchoring, or real card-data support is implemented.
 - PostgreSQL snapshots, as-of balances and the integrity report exist, but no scheduler invokes the daily report yet.
 - No ledger throughput/latency benchmark has been measured. The global chain-head lock serializes database writes.
-- Later phases remain unimplemented: refunds/settlements/webhooks, reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports. Full-flow chaos has 10,000 scenarios across two seeds, short of the 100,000 target; it simulates process kills in-process rather than terminating OS processes.
+- Later phases remain unimplemented: reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports. Full-flow chaos has 10,000 scenarios across two seeds, short of the 100,000 target; it simulates process kills in-process rather than terminating OS processes.
 - SeaweedFS is an S3-compatible local substitution for the inaccessible pinned MinIO image. Its S3 endpoint is unauthenticated and loopback-only; it does not provide production Object Lock guarantees.
 - GitHub Actions has not run on a hosted runner. Only the same local lint/type/test commands were run.
 
@@ -58,3 +61,5 @@
 
 - The initial MinIO image pull returned access denied. ADR-003 records SeaweedFS 3.93 as the local S3-compatible replacement.
 - This is a synthetic simulation. It does not move real money, accept real card data, or claim PCI DSS/RBI certification or production readiness.
+- Card refunds use the bank simulator's refund rail; network-initiated card refunds are not modelled. GST uses one rate on total fees; invoices and TDS are out of scope.
+- The merchant money lock serializes balance-dependent operations per merchant; its throughput impact is unmeasured.

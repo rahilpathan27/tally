@@ -31,11 +31,14 @@ CRASH_POINTS: tuple[str, ...] = (
     "cancel.after_cancelled_committed",
     "recovery.after_ledger_call",
     "refund.after_command_committed",
-    "refund.after_ledger_posted",
+    "refund_debit.after_ledger_posted",
     "refund.after_bank_sent",
+    "refund_complete.after_ledger_posted",
     "settlement.after_command_committed",
-    "settlement.after_ledger_posted",
+    "settlement_post.after_ledger_posted",
     "payout.after_bank_sent",
+    "payout_complete.after_ledger_posted",
+    "dispute_debit.after_ledger_posted",
 )
 
 

@@ -77,6 +77,26 @@ can retry; 4xx results are stored and replayed; a reservation held by a crashed 
 after a 60-second lease and the next retry takes it over. Re-running a handler is safe because each
 effect below it is guarded by state-machine transitions and deterministic keys.
 
+## Refunds, disputes, settlement and payouts (Phase 8)
+
+| Operation | Ledger effect | Guarantee | Test |
+| --- | --- | --- | --- |
+| Refund created | Dr payable (covered part) + Dr receivable (shortfall), Cr refunds clearing | Sum of non-failed, non-cancelled refunds plus non-won disputes never exceeds the payment amount (row lock on the payment under the merchant lock). Concurrent refunds serialize; exactly one of eight 60% refunds succeeds. | `test_refunds_settlement_payouts_disputes_and_webhooks` |
+| Refund sent to bank | Bank success: Dr refunds clearing, Cr nostro | Each attempt has its own idempotency key; unknown outcomes retry the same key; five declines escalate to `requires_action` | same |
+| Refund cancelled by ops | Dr refunds clearing, Cr receivable (up to balance) then payable | Funds return to the merchant; next settlement counts the payable credit once | same |
+| Chargeback opened / won / lost | Open: Dr payable/receivable, Cr nostro. Won: reverse. Lost: none | Fraud chargebacks and lost disputes write `risk_labels` | same |
+| Settlement | Fee, GST, reserve, recovery, shortfall and payout lines netted per account | Each item settled once; payable after posting equals not-yet-eligible sales; re-running the date returns the same settlement | same |
+| Payout | Paid: Dr payout in transit, Cr nostro. Returned: Dr in transit, Cr payable | Returned funds are re-settled once as `payout_return` | same |
+| Crash after command commit or ledger post | — | The next merchant operation or the sweeper replays the stored command; exactly one ledger entry per key | `test_money_operation_crashes_replay_to_a_single_ledger_effect` |
+
+The relay publishes outbox rows to Kafka and creates webhook deliveries in one transaction, so
+delivery is at least once (a crash after publishing re-publishes; consumers deduplicate on the
+event ID). Webhooks are signed with a per-endpoint secret stored AES-GCM encrypted. URLs must be
+HTTPS on 443/8443 to a public address; every delivery re-resolves DNS, rejects any non-public
+answer, and connects to the vetted IP with the original host in `Host`/SNI (DNS-rebinding
+defence); redirects are not followed. Local development can trust explicit hosts through
+`TALLY_WEBHOOK_TRUSTED_HOSTS`.
+
 ## Verification
 
 The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. `test_card_and_upi_happy_paths_and_illegal_transition_are_audited` covers direct card, payer PSP and bank declines; card response loss followed by hold recovery; late card authorization voiding; UPI lost response followed by success; auto-reversal after status deadline; late success corrected to suspense; configured deemed success; and debit-success/credit-failure with a lost reversal response. Unit tests cover simulator outage modes, idempotency, and circuit-breaker behavior. These checks cover the implemented local failure matrix; they do not claim alternate-bank failover, throughput, chaos safety, real-rail behavior, or production payment guarantees.

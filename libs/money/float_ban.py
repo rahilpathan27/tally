@@ -20,9 +20,22 @@ def violations(path: Path) -> list[str]:
     return problems
 
 
+# Modules that compute or carry money amounts. Keep this list in sync with new money code.
+MONEY_MODULES: tuple[str, ...] = (
+    "libs/money/*.py",
+    "services/ledger/model.py",
+    "services/ledger/invariants.py",
+    "services/core/fees.py",
+    "services/core/settlement.py",
+    "services/core/refunds.py",
+    "services/core/disputes.py",
+    "services/recon/*.py",
+)
+
+
 def main() -> int:
-    root = Path("libs/money")
-    problems = [problem for path in root.glob("*.py") for problem in violations(path)]
+    paths = sorted({path for pattern in MONEY_MODULES for path in Path(".").glob(pattern)})
+    problems = [problem for path in paths for problem in violations(path)]
     print("\n".join(problems) if problems else "Money float-ban check passed.")
     return bool(problems)
 

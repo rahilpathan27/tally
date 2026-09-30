@@ -25,6 +25,7 @@ from redis.asyncio import Redis
 from scripts.migrate import migrate
 from services.api_gateway.auth import MerchantHmacAuth
 from services.core.api import create_app as create_core_app
+from services.core.money_routes import configure_money_services
 from services.core.recovery import CircuitBreaker
 from services.core.repository import PaymentIntentRepository
 from services.simulators.bank.api import BankSimulatorConfig
@@ -166,6 +167,9 @@ async def build_stack(
     *,
     merchant_id: str | None = None,
     rate_limit: int = 1_000_000,
+    object_store: object | None = None,
+    webhook_http: httpx.AsyncClient | None = None,
+    trusted_webhook_hosts: tuple[str, ...] = (),
 ) -> LocalStack:
     general_pool = await asyncpg.create_pool(general_url, min_size=2, max_size=20)
     ledger_pool = await asyncpg.create_pool(ledger_url, min_size=2, max_size=20)
@@ -227,6 +231,14 @@ async def build_stack(
     core_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=core_app), base_url="http://core", timeout=30
     )
+    configure_money_services(
+        state,
+        pool=general_pool,
+        cipher=cipher,
+        object_store=object_store,
+        webhook_http=webhook_http,
+        trusted_webhook_hosts=trusted_webhook_hosts,
+    )
 
     await general_pool.execute(
         """INSERT INTO merchants(merchant_id, display_name) VALUES ($1, $2)
@@ -241,7 +253,15 @@ async def build_stack(
         key_id,
         merchant_id,
         cipher.encrypt(key_id, MERCHANT_SECRET),
-        ["payments:write", "payments:read", "refunds:write", "settlements:read", "webhooks:write"],
+        [
+            "payments:write",
+            "payments:read",
+            "settlements:read",
+            "disputes:read",
+            "disputes:write",
+            "webhooks:read",
+            "webhooks:write",
+        ],
         datetime.now(UTC) + timedelta(days=1),
     )
     token = (await vault_app.state.vault_repository.tokenize(TEST_PAN, 12, 2099)).token
@@ -262,5 +282,17 @@ async def build_stack(
         merchant_id=merchant_id,
         key_id=key_id,
         card_token=token,
-        clients=[core_client, ledger_http, network_http, bank_http, psp_http, vault_http],
+        clients=[
+            client
+            for client in (
+                core_client,
+                ledger_http,
+                network_http,
+                bank_http,
+                psp_http,
+                vault_http,
+                webhook_http,
+            )
+            if client is not None
+        ],
     )

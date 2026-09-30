@@ -81,7 +81,7 @@ migrate:
 	uv run python -m scripts.migrate gateway core ledger vault recon risk backoffice
 
 stack-test-integration:
-	TALLY_STACK_TESTS=1 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py
+	TALLY_STACK_TESTS=1 TALLY_KAFKA_BOOTSTRAP=127.0.0.1:19092 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py tests/integration/test_money_movement.py tests/integration/test_outbox_kafka.py
 
 chaos:
 	uv run python -m chaos.chaos_sim
