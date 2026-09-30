@@ -19,6 +19,7 @@
 - Ledger additions: platform chart migration (refund clearing, eight fee-income shards, GST payable), per-merchant payable/reserve/payout-in-transit/receivable provisioning, trial balance, statements, entry drill-down, balance as-of, snapshots with recomputation, and an integrity report endpoint.
 - Phase 8 money movement: full/partial refunds with over-refund protection, bank retries and escalation; chargebacks with evidence upload (object storage, SHA-256), win/loss handling and risk labels; T+N IST settlement with Decimal fee/GST/reserve computation, receivable recovery, sharded fee income, payout instruction files and payouts with return handling; outbox relay to Kafka and SSRF-safe signed webhooks with delivery logs, retries, redelivery and test sends. Balance-dependent operations run under a per-merchant advisory lock and replay crashed commands (ADR-012).
 - Phase 9 reconciliation: pure three-way engine (exact, grouped and fuzzy matching; eight break types), three bank statement formats (CSV rupees/IST, fixed-width paise/UTC, JSON with offsets and batched refunds), exact parsing, original files in object storage with checksums, deterministic break IDs with idempotent re-runs and next-day carry-over, three-way evidence per break, break comments/aging/SLA, daily report, and maker-checker adjustments posted to the ledger (ADR-013).
+- Phase 10 risk engine: shared online/offline features (Redis vs replay, parity-tested), versioned JSON rules with block/allow lists and maker-checker activation, synthetic fraud generator (card testing, account takeover, mule fan-in, look-alike legitimate behaviour, label noise), time-split LightGBM training with isotonic calibration and cost-based thresholds, ONNX serving with TreeSHAP reason codes, decision logging, review queue with SLA, simulated step-up OTP, shadow challenger, PSI/KS drift, model-performance endpoint, feedback-label retraining with an evaluation gate, a PostgreSQL model registry (ADR-014) and core integration with fail-open/closed (ADR-015).
 - Added ADRs 001–009 covering money, ledger locking and reservations, local object storage, tokenization, and payment orchestration, alongside ledger design and guarantees documentation.
 
 ## Verified
@@ -47,6 +48,8 @@
 
 - Phase 9 verification: `scripts/recon_eval.py` measured 100% recall, precision and classification on 17,280 planted breaks (3 formats x normal/hard x with/without next-day file x 10 seeds); a 1,000,000-transaction day parses in 7.1 s and reconciles in 6.0 s ([recon report](recon-report.md)). `tests/integration/test_reconciliation.py` reconciles real service data (payments, refunds, payouts, a genuine late success) against the simulator's statement with planted mutations, proves idempotent re-runs and carry-over, and enforces maker-checker.
 
+- Phase 10 verification: `tests/integration/test_risk_flow.py` covers allow, card-testing block (model from the third card, rule R002 from the sixth), review with bypass prevention and analyst approve/decline, step-up with wrong then correct code, fail-open and fail-closed, rule activation under maker-checker, shadow challenger logging and drift; in-process decision latency p50 6.3 ms, p99 10.5 ms (60 decisions, local machine). Feature parity matched 2,898 vectors exactly. Model test metrics: PR-AUC 0.888, recall 92.1% at 1% FPR ([model card](risk-model-card.md)); a CI test enforces metric floors on the committed champion.
+
 ## Known gaps
 
 - The local FastAPI ledger API connects using the Compose superuser, binds to loopback, and has no network authentication; the app role remains a database role template rather than the API's runtime identity.
@@ -56,7 +59,7 @@
 - Vault encryption currently uses a locally supplied AES-GCM KEK, and simulator identity uses a local shared credential rather than mTLS. No production KMS, certificate identity, key lifecycle, external audit anchoring, or real card-data support is implemented.
 - PostgreSQL snapshots, as-of balances and the integrity report exist, but no scheduler invokes the daily report yet.
 - No ledger throughput/latency benchmark has been measured. The global chain-head lock serializes database writes.
-- Later phases remain unimplemented: risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports. Full-flow chaos has 10,000 scenarios across two seeds, short of the 100,000 target; it simulates process kills in-process rather than terminating OS processes.
+- Later phases remain unimplemented: security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports. Full-flow chaos has 10,000 scenarios across two seeds, short of the 100,000 target; it simulates process kills in-process rather than terminating OS processes.
 - SeaweedFS is an S3-compatible local substitution for the inaccessible pinned MinIO image. Its S3 endpoint is unauthenticated and loopback-only; it does not provide production Object Lock guarantees.
 - GitHub Actions has not run on a hosted runner. Only the same local lint/type/test commands were run.
 
@@ -67,3 +70,4 @@
 - Card refunds use the bank simulator's refund rail; network-initiated card refunds are not modelled. GST uses one rate on total fees; invoices and TDS are out of scope.
 - The merchant money lock serializes balance-dependent operations per merchant; its throughput impact is unmeasured.
 - Reconciliation covers the platform nostro only (UPI, refunds, payouts); card settlements and chargebacks are not reconciled. Recon actors come from an `x-actor` header until the Phase 11 back office supplies authenticated identities.
+- Risk metrics come from synthetic data built alongside the model; they validate the pipeline, not real fraud performance. Legitimate customers abroad see a 15.2% vs 2.2% review rate (model card). MLflow is replaced by a PostgreSQL registry (ADR-014). The risk latency figure is in-process; HTTP and load-test latency are measured in Phase 15.

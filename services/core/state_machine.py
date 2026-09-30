@@ -25,6 +25,7 @@ ALLOWED_TRANSITIONS: dict[PaymentState, frozenset[PaymentState]] = {
         {
             PaymentState.RISK_REVIEW,
             PaymentState.AUTHORIZING,
+            PaymentState.FAILED,  # blocked by risk before any external call
             PaymentState.CANCELLED,
             PaymentState.EXPIRED,
         }

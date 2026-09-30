@@ -115,6 +115,7 @@ class LocalStack:
     psp_app: object
     network_app: object
     vault_app: object
+    risk_app: object | None
     client: httpx.AsyncClient
     ledger_transport: FlakyTransport
     bank_transport: FlakyTransport
@@ -170,6 +171,8 @@ async def build_stack(
     object_store: object | None = None,
     webhook_http: httpx.AsyncClient | None = None,
     trusted_webhook_hosts: tuple[str, ...] = (),
+    risk: bool = False,
+    model_dir: str = "ml/artifacts/fraud-gbm-v1",
 ) -> LocalStack:
     general_pool = await asyncpg.create_pool(general_url, min_size=2, max_size=20)
     ledger_pool = await asyncpg.create_pool(ledger_url, min_size=2, max_size=20)
@@ -240,6 +243,40 @@ async def build_stack(
         trusted_webhook_hosts=trusted_webhook_hosts,
     )
 
+    risk_app = None
+    risk_client = None
+    if risk:
+        from pathlib import Path
+
+        from services.risk import registry
+        from services.risk.api import create_app as create_risk_app
+        from services.risk.engine import RiskEngine
+        from services.risk.features import RedisFeatureState
+        from services.risk.rules import DEFAULT_RULES
+
+        await registry.bootstrap(general_pool, Path(model_dir), DEFAULT_RULES)
+
+        async def resume(payment_id: str, outcome: str) -> None:
+            await core_client.post(
+                f"/internal/v1/payments/{payment_id}/risk-resolution",
+                json={"outcome": outcome},
+                headers={"x-internal-key": state.recovery_key, "x-actor": "risk-analyst"},
+            )
+
+        engine = RiskEngine(
+            pool=general_pool,
+            state=RedisFeatureState(redis, namespace=f"rf:{uuid4().hex[:8]}"),
+            step_up_secret=b"stack-step-up-secret",
+            on_resolution=resume,
+        )
+        await engine.refresh(force=True)
+        risk_app = create_risk_app(engine, internal_key="stack-risk-key")
+        risk_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=risk_app), base_url="http://risk"
+        )
+        state.risk_http = risk_client
+        state.risk_key = "stack-risk-key"
+        state.risk_timeout_seconds = 5.0  # in-process tests; the service budget is measured
     await general_pool.execute(
         """INSERT INTO merchants(merchant_id, display_name) VALUES ($1, $2)
            ON CONFLICT (merchant_id) DO NOTHING""",
@@ -275,6 +312,7 @@ async def build_stack(
         psp_app=psp_app,
         network_app=network_app,
         vault_app=vault_app,
+        risk_app=risk_app,
         client=core_client,
         ledger_transport=ledger_transport,
         bank_transport=bank_transport,
@@ -292,6 +330,7 @@ async def build_stack(
                 psp_http,
                 vault_http,
                 webhook_http,
+                risk_client,
             )
             if client is not None
         ],

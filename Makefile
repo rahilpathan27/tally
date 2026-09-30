@@ -1,4 +1,4 @@
-.PHONY: recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
 CHAOS_FLOW_SCENARIOS ?= 2000
@@ -81,7 +81,7 @@ migrate:
 	uv run python -m scripts.migrate gateway core ledger vault recon risk backoffice
 
 stack-test-integration:
-	TALLY_STACK_TESTS=1 TALLY_KAFKA_BOOTSTRAP=127.0.0.1:19092 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py tests/integration/test_money_movement.py tests/integration/test_outbox_kafka.py tests/integration/test_reconciliation.py
+	TALLY_STACK_TESTS=1 TALLY_KAFKA_BOOTSTRAP=127.0.0.1:19092 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py tests/integration/test_money_movement.py tests/integration/test_outbox_kafka.py tests/integration/test_reconciliation.py tests/integration/test_risk_flow.py tests/integration/test_risk_retrain.py tests/integration/test_risk_feature_parity.py
 
 recon-api:
 	TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally TALLY_INTERNAL_KEY=tally-local-internal TALLY_S3_ENDPOINT=http://127.0.0.1:8333 uv run uvicorn services.recon.api:app --host 127.0.0.1 --port 8020
@@ -93,5 +93,15 @@ chaos:
 	uv run python -m chaos.chaos_sim
 	uv run python -m chaos.flow_sim --scenarios $(CHAOS_FLOW_SCENARIOS)
 
-simulate train loadtest demo deploy-dev destroy-dev:
+train:
+	uv run python -m ml.train
+	uv run python -m ml.model_card
+
+retrain:
+	uv run python -m ml.retrain --version fraud-gbm-$$(date +%Y%m%d%H%M)
+
+risk-api:
+	TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally REDIS_URL=redis://127.0.0.1:6379/0 TALLY_INTERNAL_KEY=tally-local-internal TALLY_RECOVERY_KEY=tally-local-recovery uv run uvicorn services.risk.api:app --host 127.0.0.1 --port 8030
+
+simulate loadtest demo deploy-dev destroy-dev:
 	@echo "$@ is not available yet. See docs/PROGRESS.md for implementation status."

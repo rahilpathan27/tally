@@ -18,6 +18,18 @@ Vpa = Annotated[
 ]
 
 
+class RiskContext(BaseModel):
+    """Device and network signals collected by the checkout (simulated in this project)."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    device_id: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    ip_address: Annotated[str, Field(min_length=3, max_length=64)] | None = None
+    ip_country: Annotated[str, Field(pattern=r"^[A-Z]{2}$")] | None = None
+    instrument_country: Annotated[str, Field(pattern=r"^[A-Z]{2}$")] | None = None
+    account_age_days: Annotated[int, Field(ge=0, le=36_500)] | None = None
+
+
 class CreatePaymentIntent(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
@@ -27,6 +39,7 @@ class CreatePaymentIntent(BaseModel):
     payment_method_token: Annotated[str, Field(min_length=8, max_length=200)] | None = None
     payer_vpa: Vpa | None = None
     payee_vpa: Vpa | None = None
+    risk_context: RiskContext | None = None
 
     @model_validator(mode="after")
     def validate_method_fields(self) -> CreatePaymentIntent:
@@ -51,3 +64,18 @@ class ConfirmResponse(BaseModel):
     payment_id: UUID
     status: str
     next_action: str | None = None
+    challenge_id: UUID | None = None
+    reason_codes: list[str] | None = None
+
+
+class StepUpRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    challenge_id: UUID = Field(strict=False)
+    code: Annotated[str, StringConstraints(pattern=r"^[0-9]{6}$")]
+
+
+class RiskResolution(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    outcome: Literal["approve", "decline"]

@@ -6,11 +6,12 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -31,6 +32,7 @@ from services.core.money_routes import (
     configure_money_services,
     internal_router,
     merchant_router,
+    require_internal,
     run_money_workers,
 )
 from services.core.recovery import CircuitBreaker
@@ -40,7 +42,14 @@ from services.core.recovery_worker import (
     sweep_stalled_payments,
 )
 from services.core.repository import PaymentIntentRepository
-from services.core.schemas import ConfirmResponse, CreatePaymentIntent, PaymentIntentResponse
+from services.core.risk_client import assess_payment_risk
+from services.core.schemas import (
+    ConfirmResponse,
+    CreatePaymentIntent,
+    PaymentIntentResponse,
+    RiskResolution,
+    StepUpRequest,
+)
 from services.core.state_machine import PaymentState
 from services.core.webhooks import KafkaPublisher
 
@@ -79,17 +88,291 @@ def _correlation_id(request: Request) -> str:
     return hashlib.sha256(value[:200].encode("utf-8")).hexdigest() if value else str(uuid4())
 
 
-async def _await_status_check(request: Request, payment_id: UUID, reason: str) -> ConfirmResponse:
+async def _park_unknown(
+    repo: PaymentIntentRepository,
+    merchant_id: str,
+    correlation_id: str,
+    payment_id: UUID,
+    reason: str,
+) -> ConfirmResponse:
     """Park a payment whose external leg succeeded but whose ledger result is unknown."""
-    await _repository(request).transition(
+    await repo.transition(
         payment_id,
-        _principal(request).merchant_id,
+        merchant_id,
         PaymentState.PENDING_UNKNOWN,
         "payment-orchestrator",
         reason,
-        _correlation_id(request),
+        correlation_id,
     )
     return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+
+
+async def authorize_payment(
+    state: Any,
+    payment_id: UUID,
+    payment: asyncpg.Record,
+    merchant_id: str,
+    actor: str,
+    correlation_id: str,
+) -> ConfirmResponse:
+    """Run card authorization or the UPI transfer for a payment that passed risk checks."""
+    repo: PaymentIntentRepository = state.payment_repository
+    amount = int(payment["amount_minor"])
+    ledger_key = f"{payment_id}:{payment['payment_method_type']}:authorization:hold"
+    ledger_request: dict[str, object] = {
+        "idempotency_key": ledger_key,
+        "postings": [
+            {"account_id": "bank:simulated:INR", "direction": "debit", "amount_minor": amount},
+            {
+                "account_id": f"merchant:{merchant_id}:payable:INR",
+                "direction": "credit",
+                "amount_minor": amount,
+            },
+        ],
+    }
+    payment_method = payment["payment_method_type"]
+    if payment_method == "upi":
+        ledger_key = f"{payment_id}:upi:transfer:post"
+        ledger_request["idempotency_key"] = ledger_key
+    command = (
+        "place_hold" if payment_method == "card" else "post_entry",
+        ledger_key,
+        ledger_request,
+    )
+    accepted, _, _ = await repo.transition(
+        payment_id,
+        merchant_id,
+        PaymentState.AUTHORIZING,
+        actor,
+        "merchant confirmed payment intent",
+        correlation_id,
+        command=command,
+    )
+    if not accepted:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "ILLEGAL_PAYMENT_TRANSITION",
+                "message": "Payment cannot be confirmed from its current state.",
+            },
+        )
+    fault_point(state, "confirm.after_authorizing_committed")
+
+    if payment_method == "card":
+        network: httpx.AsyncClient = state.card_network_http
+        network_breaker: CircuitBreaker = state.card_network_breaker
+        if not network_breaker.allow_request():
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.PENDING_UNKNOWN,
+                actor,
+                "card-network circuit breaker is open before dispatch",
+                correlation_id,
+            )
+            return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+        try:
+            simulator_response = await network.post(
+                "/v1/authorizations",
+                json={
+                    "payment_id": str(payment_id),
+                    "payment_method_token": payment["payment_method_token"],
+                    "amount_minor": amount,
+                    "currency": payment["currency"].strip(),
+                },
+                headers={
+                    "x-simulator-key": state.network_simulator_key,
+                    "Idempotency-Key": f"{payment_id}:card:network:authorize",
+                },
+            )
+            simulator_response.raise_for_status()
+            network_breaker.record_success()
+        except httpx.HTTPError:
+            network_breaker.record_failure()
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.PENDING_UNKNOWN,
+                actor,
+                "card network response was unavailable; outcome requires status check",
+                correlation_id,
+            )
+            return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+        simulator_result = simulator_response.json()
+        if simulator_result.get("status") != "approved":
+            await repo.complete_command(ledger_key, {"status": "declined"}, skipped=True)
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.FAILED,
+                "card-network-simulator",
+                "simulated card authorization was declined",
+                correlation_id,
+            )
+            return ConfirmResponse(payment_id=payment_id, status="failed")
+        fault_point(state, "card.after_network_approved")
+    else:
+        psp: httpx.AsyncClient = state.payer_psp_http
+        try:
+            psp_response = await psp.post(
+                "/v1/approvals",
+                json={
+                    "payment_id": str(payment_id),
+                    "payer_vpa": payment["payer_vpa"],
+                    "amount_minor": amount,
+                },
+                headers={"Idempotency-Key": f"{payment_id}:upi:psp:authorize"},
+            )
+            psp_response.raise_for_status()
+        except httpx.HTTPError:
+            # No bank leg has been dispatched, so no funds can have moved.
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.FAILED,
+                "payment-orchestrator",
+                "payer PSP was unavailable before bank dispatch; no funds moved",
+                correlation_id,
+                completed_command=(ledger_key, {"status": "payer_psp_unavailable"}, True),
+            )
+            return ConfirmResponse(payment_id=payment_id, status="failed")
+        if psp_response.json().get("status") != "approved":
+            await repo.complete_command(ledger_key, {"status": "payer_declined"}, skipped=True)
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.FAILED,
+                "payer-psp-simulator",
+                "payer declined the UPI collect request",
+                correlation_id,
+            )
+            return ConfirmResponse(payment_id=payment_id, status="failed")
+        fault_point(state, "upi.after_psp_approved")
+        bank: httpx.AsyncClient = state.bank_http
+        breaker: CircuitBreaker = state.bank_breaker
+        if not breaker.allow_request():
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.PENDING_UNKNOWN,
+                "payment-orchestrator",
+                "bank circuit breaker is open before transfer dispatch",
+                correlation_id,
+            )
+            return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+        try:
+            transfer_response = await bank.post(
+                "/v1/transfers",
+                json={
+                    "payment_id": str(payment_id),
+                    "remitter_bank": payment["remitter_bank"],
+                    "beneficiary_bank": payment["beneficiary_bank"],
+                    "amount_minor": amount,
+                    "currency": payment["currency"].strip(),
+                },
+                headers={"Idempotency-Key": f"{payment_id}:upi:bank:transfer"},
+            )
+            transfer_response.raise_for_status()
+            breaker.record_success()
+        except httpx.HTTPError:
+            breaker.record_failure()
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.PENDING_UNKNOWN,
+                "payment-orchestrator",
+                "bank response was unavailable; outcome requires status check",
+                correlation_id,
+            )
+            return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+        transfer_status = transfer_response.json().get("status")
+        if transfer_status == "debit_succeeded_credit_failed":
+            try:
+                reversal_response = await bank.post(f"/v1/transfers/{payment_id}/reverse")
+                reversal_response.raise_for_status()
+            except httpx.HTTPError:
+                await repo.transition(
+                    payment_id,
+                    merchant_id,
+                    PaymentState.PENDING_UNKNOWN,
+                    "payment-orchestrator",
+                    "debit succeeded but credit failed; reversal result is unknown",
+                    correlation_id,
+                )
+                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.FAILED,
+                "bank-simulator",
+                "credit leg failed and debit leg was reversed",
+                correlation_id,
+                completed_command=(ledger_key, {"status": "reversed"}, True),
+            )
+            return ConfirmResponse(payment_id=payment_id, status="failed")
+        if transfer_status != "approved":
+            await repo.transition(
+                payment_id,
+                merchant_id,
+                PaymentState.FAILED,
+                "bank-simulator",
+                "simulated bank declined the transfer",
+                correlation_id,
+                completed_command=(ledger_key, {"status": "bank_declined"}, True),
+            )
+            return ConfirmResponse(payment_id=payment_id, status="failed")
+    ledger: httpx.AsyncClient = state.ledger_http
+    if payment_method == "card":
+        try:
+            ledger_response = await ledger.post("/v1/holds", json=ledger_request)
+            ledger_result = _validate_ledger_response(ledger_response)
+        except (httpx.HTTPError, HTTPException):
+            return await _park_unknown(
+                repo,
+                merchant_id,
+                correlation_id,
+                payment_id,
+                "card approved but ledger hold result is unknown",
+            )
+        fault_point(state, "card.after_hold_placed")
+        hold_id = int(cast(str, ledger_result["hold_id"]))
+        await repo.complete_command(ledger_key, ledger_result)
+        accepted, _, _ = await repo.transition(
+            payment_id,
+            merchant_id,
+            PaymentState.AUTHORIZED,
+            "card-network-simulator",
+            "card authorization approved and ledger hold placed",
+            correlation_id,
+            extra_update={"ledger_hold_id": hold_id},
+        )
+        if not accepted:
+            raise HTTPException(409, "payment authorization state changed concurrently")
+        return ConfirmResponse(payment_id=payment_id, status="authorized", next_action="capture")
+
+    fault_point(state, "upi.after_bank_approved")
+    try:
+        ledger_response = await ledger.post("/v1/entries", json=ledger_request)
+        ledger_result = _validate_ledger_response(ledger_response)
+    except (httpx.HTTPError, HTTPException):
+        return await _park_unknown(
+            repo,
+            merchant_id,
+            correlation_id,
+            payment_id,
+            "bank approved but ledger posting result is unknown",
+        )
+    fault_point(state, "upi.after_ledger_posted")
+    await repo.complete_command(ledger_key, ledger_result)
+    await repo.transition(
+        payment_id,
+        merchant_id,
+        PaymentState.SUCCEEDED,
+        "payment-orchestrator",
+        "UPI payer approved and both simulated bank legs approved",
+        correlation_id,
+    )
+    return ConfirmResponse(payment_id=payment_id, status="succeeded")
 
 
 def create_app() -> FastAPI:
@@ -132,6 +415,12 @@ def create_app() -> FastAPI:
         app.state.recovery_key = os.environ.get("TALLY_RECOVERY_KEY", "")
         app.state.bank_breaker = CircuitBreaker()
         app.state.card_network_breaker = CircuitBreaker()
+        app.state.risk_http = (
+            httpx.AsyncClient(base_url=os.environ["TALLY_RISK_URL"])
+            if os.environ.get("TALLY_RISK_URL")
+            else None
+        )
+        app.state.risk_key = os.environ.get("TALLY_INTERNAL_KEY", "")
         object_store: object | None = None
         if os.environ.get("TALLY_S3_ENDPOINT"):
             object_store = S3ObjectStore(
@@ -194,6 +483,8 @@ def create_app() -> FastAPI:
             await app.state.payer_psp_http.aclose()
             await app.state.card_network_http.aclose()
             await app.state.webhook_dispatcher.http.aclose()
+            if app.state.risk_http is not None:
+                await app.state.risk_http.aclose()
             if publisher is not None:
                 await publisher.close()
             await redis.aclose()
@@ -203,6 +494,8 @@ def create_app() -> FastAPI:
     app.state.payment_repository = None
     app.state.provisioned_merchants = set()
     app.state.fault_injector = None
+    app.state.risk_http = None
+    app.state.risk_key = ""
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -234,6 +527,39 @@ def create_app() -> FastAPI:
             _repository(request), request.app.state.ledger_http
         )
         return {"processed": processed}
+
+    @app.post("/internal/v1/payments/{payment_id}/risk-resolution", include_in_schema=False)
+    async def risk_resolution(
+        payment_id: PaymentId, body: RiskResolution, request: Request
+    ) -> ConfirmResponse:
+        """Resume a payment after an analyst decided its risk review."""
+        require_internal(request)
+        pool: asyncpg.Pool = request.app.state.pool
+        merchant_id = await pool.fetchval(
+            "SELECT merchant_id FROM payment_intents WHERE payment_id = $1", payment_id
+        )
+        if merchant_id is None:
+            raise HTTPException(404, detail={"code": "PAYMENT_NOT_FOUND", "message": "No payment."})
+        payment = await _repository(request).get(payment_id, merchant_id)
+        assert payment is not None
+        if payment["status"] != PaymentState.RISK_REVIEW.value:
+            raise HTTPException(
+                409, detail={"code": "NOT_IN_REVIEW", "message": "Payment is not in review."}
+            )
+        actor = request.headers.get("x-actor", "risk-analyst")
+        if body.outcome == "decline":
+            await _repository(request).transition(
+                payment_id,
+                merchant_id,
+                PaymentState.FAILED,
+                actor,
+                "risk analyst declined the payment",
+                str(payment_id),
+            )
+            return ConfirmResponse(payment_id=payment_id, status="failed")
+        return await authorize_payment(
+            request.app.state, payment_id, payment, merchant_id, actor, str(payment_id)
+        )
 
     app.include_router(internal_router)
     app.include_router(merchant_router)
@@ -303,38 +629,9 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 404, detail={"code": "PAYMENT_NOT_FOUND", "message": "Payment was not found."}
             )
-        amount = int(payment["amount_minor"])
-        ledger_key = f"{payment_id}:{payment['payment_method_type']}:authorization:hold"
-        ledger_request: dict[str, object] = {
-            "idempotency_key": ledger_key,
-            "postings": [
-                {"account_id": "bank:simulated:INR", "direction": "debit", "amount_minor": amount},
-                {
-                    "account_id": f"merchant:{principal.merchant_id}:payable:INR",
-                    "direction": "credit",
-                    "amount_minor": amount,
-                },
-            ],
-        }
-        payment_method = payment["payment_method_type"]
-        if payment_method == "upi":
-            ledger_key = f"{payment_id}:upi:transfer:post"
-            ledger_request["idempotency_key"] = ledger_key
-        command = (
-            "place_hold" if payment_method == "card" else "post_entry",
-            ledger_key,
-            ledger_request,
-        )
-        accepted, _, _ = await _repository(request).transition(
-            payment_id,
-            principal.merchant_id,
-            PaymentState.AUTHORIZING,
-            principal.key_id,
-            "merchant confirmed payment intent",
-            _correlation_id(request),
-            command=command,
-        )
-        if not accepted:
+        if payment["status"] != PaymentState.CREATED.value:
+            # risk_review -> authorizing is legal for the review/step-up paths only; a repeated
+            # confirm must never bypass a pending review.
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 detail={
@@ -342,221 +639,111 @@ def create_app() -> FastAPI:
                     "message": "Payment cannot be confirmed from its current state.",
                 },
             )
-        fault_point(request.app.state, "confirm.after_authorizing_committed")
-
-        if payment_method == "card":
-            network: httpx.AsyncClient = request.app.state.card_network_http
-            network_breaker: CircuitBreaker = request.app.state.card_network_breaker
-            if not network_breaker.allow_request():
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.PENDING_UNKNOWN,
-                    principal.key_id,
-                    "card-network circuit breaker is open before dispatch",
-                    _correlation_id(request),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
-            try:
-                simulator_response = await network.post(
-                    "/v1/authorizations",
-                    json={
-                        "payment_id": str(payment_id),
-                        "payment_method_token": payment["payment_method_token"],
-                        "amount_minor": amount,
-                        "currency": payment["currency"].strip(),
-                    },
-                    headers={
-                        "x-simulator-key": request.app.state.network_simulator_key,
-                        "Idempotency-Key": f"{payment_id}:card:network:authorize",
-                    },
-                )
-                simulator_response.raise_for_status()
-                network_breaker.record_success()
-            except httpx.HTTPError:
-                network_breaker.record_failure()
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.PENDING_UNKNOWN,
-                    principal.key_id,
-                    "card network response was unavailable; outcome requires status check",
-                    _correlation_id(request),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
-            simulator_result = simulator_response.json()
-            if simulator_result.get("status") != "approved":
-                await _repository(request).complete_command(
-                    ledger_key, {"status": "declined"}, skipped=True
-                )
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.FAILED,
-                    "card-network-simulator",
-                    "simulated card authorization was declined",
-                    _correlation_id(request),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="failed")
-            fault_point(request.app.state, "card.after_network_approved")
-        else:
-            psp: httpx.AsyncClient = request.app.state.payer_psp_http
-            try:
-                psp_response = await psp.post(
-                    "/v1/approvals",
-                    json={
-                        "payment_id": str(payment_id),
-                        "payer_vpa": payment["payer_vpa"],
-                        "amount_minor": amount,
-                    },
-                    headers={"Idempotency-Key": f"{payment_id}:upi:psp:authorize"},
-                )
-                psp_response.raise_for_status()
-            except httpx.HTTPError:
-                # No bank leg has been dispatched, so no funds can have moved.
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.FAILED,
-                    "payment-orchestrator",
-                    "payer PSP was unavailable before bank dispatch; no funds moved",
-                    _correlation_id(request),
-                    completed_command=(ledger_key, {"status": "payer_psp_unavailable"}, True),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="failed")
-            if psp_response.json().get("status") != "approved":
-                await _repository(request).complete_command(
-                    ledger_key, {"status": "payer_declined"}, skipped=True
-                )
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.FAILED,
-                    "payer-psp-simulator",
-                    "payer declined the UPI collect request",
-                    _correlation_id(request),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="failed")
-            fault_point(request.app.state, "upi.after_psp_approved")
-            bank: httpx.AsyncClient = request.app.state.bank_http
-            breaker: CircuitBreaker = request.app.state.bank_breaker
-            if not breaker.allow_request():
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.PENDING_UNKNOWN,
-                    "payment-orchestrator",
-                    "bank circuit breaker is open before transfer dispatch",
-                    _correlation_id(request),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
-            try:
-                transfer_response = await bank.post(
-                    "/v1/transfers",
-                    json={
-                        "payment_id": str(payment_id),
-                        "remitter_bank": payment["remitter_bank"],
-                        "beneficiary_bank": payment["beneficiary_bank"],
-                        "amount_minor": amount,
-                        "currency": payment["currency"].strip(),
-                    },
-                    headers={"Idempotency-Key": f"{payment_id}:upi:bank:transfer"},
-                )
-                transfer_response.raise_for_status()
-                breaker.record_success()
-            except httpx.HTTPError:
-                breaker.record_failure()
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.PENDING_UNKNOWN,
-                    "payment-orchestrator",
-                    "bank response was unavailable; outcome requires status check",
-                    _correlation_id(request),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
-            transfer_status = transfer_response.json().get("status")
-            if transfer_status == "debit_succeeded_credit_failed":
-                try:
-                    reversal_response = await bank.post(f"/v1/transfers/{payment_id}/reverse")
-                    reversal_response.raise_for_status()
-                except httpx.HTTPError:
-                    await _repository(request).transition(
-                        payment_id,
-                        principal.merchant_id,
-                        PaymentState.PENDING_UNKNOWN,
-                        "payment-orchestrator",
-                        "debit succeeded but credit failed; reversal result is unknown",
-                        _correlation_id(request),
-                    )
-                    return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.FAILED,
-                    "bank-simulator",
-                    "credit leg failed and debit leg was reversed",
-                    _correlation_id(request),
-                    completed_command=(ledger_key, {"status": "reversed"}, True),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="failed")
-            if transfer_status != "approved":
-                await _repository(request).transition(
-                    payment_id,
-                    principal.merchant_id,
-                    PaymentState.FAILED,
-                    "bank-simulator",
-                    "simulated bank declined the transfer",
-                    _correlation_id(request),
-                    completed_command=(ledger_key, {"status": "bank_declined"}, True),
-                )
-                return ConfirmResponse(payment_id=payment_id, status="failed")
-        ledger: httpx.AsyncClient = request.app.state.ledger_http
-        if payment_method == "card":
-            try:
-                ledger_response = await ledger.post("/v1/holds", json=ledger_request)
-                ledger_result = _validate_ledger_response(ledger_response)
-            except (httpx.HTTPError, HTTPException):
-                return await _await_status_check(
-                    request, payment_id, "card approved but ledger hold result is unknown"
-                )
-            fault_point(request.app.state, "card.after_hold_placed")
-            hold_id = int(cast(str, ledger_result["hold_id"]))
-            await _repository(request).complete_command(ledger_key, ledger_result)
+        state = request.app.state
+        correlation_id = _correlation_id(request)
+        risk = await assess_payment_risk(state, payment)
+        if risk.decision == "block":
+            await _repository(request).transition(
+                payment_id,
+                principal.merchant_id,
+                PaymentState.FAILED,
+                "risk-engine",
+                f"blocked by risk ({risk.source}): {', '.join(risk.reason_codes) or 'no reason'}",
+                correlation_id,
+                extra_update={"risk_outcome": risk.as_json()},
+            )
+            return ConfirmResponse(
+                payment_id=payment_id, status="failed", reason_codes=risk.reason_codes
+            )
+        if risk.decision in {"review", "step_up"}:
             accepted, _, _ = await _repository(request).transition(
                 payment_id,
                 principal.merchant_id,
-                PaymentState.AUTHORIZED,
-                "card-network-simulator",
-                "card authorization approved and ledger hold placed",
-                _correlation_id(request),
-                extra_update={"ledger_hold_id": hold_id},
+                PaymentState.RISK_REVIEW,
+                "risk-engine",
+                f"risk {risk.decision}: {', '.join(risk.reason_codes)}",
+                correlation_id,
+                extra_update={"risk_outcome": risk.as_json()},
             )
             if not accepted:
-                raise HTTPException(409, "payment authorization state changed concurrently")
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "ILLEGAL_PAYMENT_TRANSITION",
+                        "message": "Payment state changed concurrently.",
+                    },
+                )
             return ConfirmResponse(
-                payment_id=payment_id, status="authorized", next_action="capture"
+                payment_id=payment_id,
+                status="risk_review",
+                next_action="step_up" if risk.decision == "step_up" else "await_review",
+                challenge_id=UUID(risk.challenge_id) if risk.challenge_id else None,
+                reason_codes=risk.reason_codes,
             )
-
-        fault_point(request.app.state, "upi.after_bank_approved")
-        try:
-            ledger_response = await ledger.post("/v1/entries", json=ledger_request)
-            ledger_result = _validate_ledger_response(ledger_response)
-        except (httpx.HTTPError, HTTPException):
-            return await _await_status_check(
-                request, payment_id, "bank approved but ledger posting result is unknown"
-            )
-        fault_point(request.app.state, "upi.after_ledger_posted")
-        await _repository(request).complete_command(ledger_key, ledger_result)
-        await _repository(request).transition(
+        return await authorize_payment(
+            state,
             payment_id,
+            payment,
             principal.merchant_id,
-            PaymentState.SUCCEEDED,
-            "payment-orchestrator",
-            "UPI payer approved and both simulated bank legs approved",
+            principal.key_id,
+            correlation_id,
+        )
+
+    @app.post("/v1/payment_intents/{payment_id}/step_up", response_model=ConfirmResponse)
+    @requires_scope("payments:write")
+    async def step_up_payment_intent(
+        payment_id: PaymentId, body: StepUpRequest, request: Request
+    ) -> ConfirmResponse:
+        """Complete a simulated OTP challenge; on success the payment is authorized."""
+        principal = _principal(request)
+        state = request.app.state
+        payment = await _repository(request).get(payment_id, principal.merchant_id)
+        if payment is None:
+            raise HTTPException(
+                404, detail={"code": "PAYMENT_NOT_FOUND", "message": "Payment was not found."}
+            )
+        outcome = payment["risk_outcome"]
+        outcome = json.loads(outcome) if isinstance(outcome, str) else (outcome or {})
+        if payment["status"] != PaymentState.RISK_REVIEW.value or outcome.get(
+            "challenge_id"
+        ) != str(body.challenge_id):
+            raise HTTPException(
+                409, detail={"code": "NO_CHALLENGE", "message": "No matching challenge."}
+            )
+        try:
+            verified = await state.risk_http.post(
+                f"/v1/step_up/{body.challenge_id}/verify",
+                json={"code": body.code},
+                headers={"x-internal-key": state.risk_key, "x-actor": "core"},
+            )
+            verified.raise_for_status()
+            result = str(verified.json()["status"])
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            raise HTTPException(
+                503, detail={"code": "RISK_UNAVAILABLE", "message": "Retry the challenge."}
+            ) from exc
+        if result == "incorrect":
+            raise HTTPException(
+                422, detail={"code": "STEP_UP_INCORRECT", "message": "The code is incorrect."}
+            )
+        if result != "verified":
+            await _repository(request).transition(
+                payment_id,
+                principal.merchant_id,
+                PaymentState.FAILED,
+                "risk-engine",
+                f"step-up challenge {result}",
+                _correlation_id(request),
+            )
+            return ConfirmResponse(payment_id=payment_id, status="failed")
+        return await authorize_payment(
+            state,
+            payment_id,
+            payment,
+            principal.merchant_id,
+            "step-up",
             _correlation_id(request),
         )
-        return ConfirmResponse(payment_id=payment_id, status="succeeded")
 
     @app.post("/v1/payment_intents/{payment_id}/capture", response_model=ConfirmResponse)
     @requires_scope("payments:write")

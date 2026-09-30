@@ -20,3 +20,7 @@ terraform.tfstate*
 .terraform/
 *.tfvars
 !.example.tfvars
+# Only the committed champion model is versioned; retraining output stays local.
+ml/artifacts/*
+!ml/artifacts/fraud-gbm-v1/
+.data/

@@ -48,8 +48,8 @@ class PaymentIntentRepository:
             row = await connection.fetchrow(
                 """INSERT INTO payment_intents(
                        payment_id, merchant_id, amount_minor, currency, payment_method_type,
-                       payment_method_token, payer_vpa, payee_vpa, status, mode
-                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created', $9)
+                       payment_method_token, payer_vpa, payee_vpa, status, mode, risk_context
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created', $9, $10::jsonb)
                    RETURNING payment_id, amount_minor, currency, payment_method_type,
                              status, created_at""",
                 payment_id,
@@ -61,6 +61,9 @@ class PaymentIntentRepository:
                 body.payer_vpa,
                 body.payee_vpa,
                 mode,
+                "{}"
+                if body.risk_context is None
+                else body.risk_context.model_dump_json(exclude_none=True),
             )
             await connection.execute(
                 """INSERT INTO payment_transitions(
@@ -217,13 +220,22 @@ class PaymentIntentRepository:
                         json.dumps(result, separators=(",", ":")),
                     )
                 if extra_update:
-                    await connection.execute(
-                        """UPDATE payment_intents SET ledger_hold_id = $3
-                           WHERE payment_id = $1 AND merchant_id = $2""",
-                        payment_id,
-                        merchant_id,
-                        extra_update["ledger_hold_id"],
-                    )
+                    if "ledger_hold_id" in extra_update:
+                        await connection.execute(
+                            """UPDATE payment_intents SET ledger_hold_id = $3
+                               WHERE payment_id = $1 AND merchant_id = $2""",
+                            payment_id,
+                            merchant_id,
+                            extra_update["ledger_hold_id"],
+                        )
+                    if "risk_outcome" in extra_update:
+                        await connection.execute(
+                            """UPDATE payment_intents SET risk_outcome = $3::jsonb
+                               WHERE payment_id = $1 AND merchant_id = $2""",
+                            payment_id,
+                            merchant_id,
+                            json.dumps(extra_update["risk_outcome"], default=str),
+                        )
         return accepted, current, row
 
     async def complete_command(
@@ -244,7 +256,8 @@ class PaymentIntentRepository:
             return await connection.fetchrow(
                 """SELECT p.payment_id, p.amount_minor, p.currency, p.payment_method_type, p.status,
                           p.payment_method_token, p.payer_vpa, p.payee_vpa, p.ledger_hold_id,
-                          p.created_at, payer.bank_id AS remitter_bank,
+                          p.created_at, p.risk_context, p.risk_outcome, p.merchant_id,
+                          payer.bank_id AS remitter_bank,
                           payee.bank_id AS beneficiary_bank
                    FROM payment_intents p
                    LEFT JOIN core_vpas payer ON payer.vpa = p.payer_vpa
