@@ -1,4 +1,4 @@
-.PHONY: migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
 CHAOS_FLOW_SCENARIOS ?= 2000
@@ -81,7 +81,13 @@ migrate:
 	uv run python -m scripts.migrate gateway core ledger vault recon risk backoffice
 
 stack-test-integration:
-	TALLY_STACK_TESTS=1 TALLY_KAFKA_BOOTSTRAP=127.0.0.1:19092 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py tests/integration/test_money_movement.py tests/integration/test_outbox_kafka.py
+	TALLY_STACK_TESTS=1 TALLY_KAFKA_BOOTSTRAP=127.0.0.1:19092 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py tests/integration/test_money_movement.py tests/integration/test_outbox_kafka.py tests/integration/test_reconciliation.py
+
+recon-api:
+	TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally TALLY_INTERNAL_KEY=tally-local-internal TALLY_S3_ENDPOINT=http://127.0.0.1:8333 uv run uvicorn services.recon.api:app --host 127.0.0.1 --port 8020
+
+recon-eval:
+	uv run python -m scripts.recon_eval
 
 chaos:
 	uv run python -m chaos.chaos_sim

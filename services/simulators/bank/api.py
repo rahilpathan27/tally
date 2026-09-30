@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -57,6 +58,11 @@ class PayoutResponse(BaseModel):
 
 
 RAIL_MODES = {"approve", "decline", "timeout", "http_500"}
+
+
+def utr(seed: str) -> str:
+    """Deterministic 16-character UTR-style bank reference."""
+    return "UTR" + str(int(hashlib.sha256(seed.encode()).hexdigest()[:16], 16))[:13].zfill(13)
 
 
 @dataclass(slots=True)
@@ -138,7 +144,7 @@ def create_app(config: BankSimulatorConfig | None = None) -> FastAPI:
                 if "decline" in modes
                 else "approved"
             ),
-            bank_reference=f"bank_{body.payment_id}",
+            bank_reference=utr(f"transfer:{body.payment_id}"),
         )
         current.requests[idempotency_key] = (fingerprint, result)
         if result.status == "approved":
@@ -200,7 +206,7 @@ def create_app(config: BankSimulatorConfig | None = None) -> FastAPI:
         if mode == "http_500":
             raise HTTPException(503, f"simulated {kind} rail outage")
         outcome = failure if mode == "decline" else success
-        result = {"status": outcome, "bank_reference": f"{kind}_{reference}_{len(current.journal)}"}
+        result = {"status": outcome, "bank_reference": utr(f"{kind}:{idempotency_key}")}
         current.rail_requests[idempotency_key] = (fingerprint, result)
         current.rail_statuses[reference] = outcome
         current.journal.append(

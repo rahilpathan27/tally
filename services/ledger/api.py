@@ -481,6 +481,7 @@ class StatementLine(BaseModel):
     amount_minor: int
     natural_delta_minor: int
     created_at: str
+    source_key: str
 
 
 class StatementResponse(BaseModel):
@@ -561,23 +562,35 @@ async def trial_balance(request: Request, as_of: datetime | None = None) -> Tria
 async def account_statement(
     account_id: AccountId,
     request: Request,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 100,
     cursor: Annotated[int | None, Query(ge=1)] = None,
+    from_time: datetime | None = None,
+    to_time: datetime | None = None,
 ) -> StatementResponse:
-    """Newest-first postings for an account (and its shards), keyset-paginated by posting ID."""
+    """Newest-first postings for an account (and its shards), keyset-paginated by posting ID.
+
+    ``source_key`` is the hold's key for postings that came from a captured hold, otherwise the
+    entry key, so callers can attribute every posting to its business object.
+    """
     rows = await _pool(request).fetch(
         """SELECT p.posting_id, p.entry_id, e.idempotency_key, p.direction::text AS direction,
                   p.amount_minor, p.created_at,
+                  coalesce(h.idempotency_key, e.idempotency_key) AS source_key,
                   ledger_natural_delta(a.account_type, p.direction, p.amount_minor) AS delta
            FROM ledger_postings p
            JOIN ledger_accounts a ON a.account_id = p.account_id
            JOIN ledger_journal_entries e ON e.entry_id = p.entry_id
+           LEFT JOIN ledger_holds h ON h.entry_id = e.entry_id
            WHERE (a.account_id = $1 OR a.shard_parent_id = $1)
              AND ($2::bigint IS NULL OR p.posting_id < $2)
+             AND ($4::timestamptz IS NULL OR p.created_at >= $4)
+             AND ($5::timestamptz IS NULL OR p.created_at < $5)
            ORDER BY p.posting_id DESC LIMIT $3""",
         account_id,
         cursor,
         limit + 1,
+        from_time,
+        to_time,
     )
     lines = [
         StatementLine(
@@ -588,6 +601,7 @@ async def account_statement(
             amount_minor=row["amount_minor"],
             natural_delta_minor=row["delta"],
             created_at=row["created_at"].isoformat(),
+            source_key=row["source_key"],
         )
         for row in rows[:limit]
     ]

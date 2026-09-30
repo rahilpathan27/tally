@@ -437,6 +437,10 @@
           "posting_id": {
             "title": "Posting Id",
             "type": "string"
+          },
+          "source_key": {
+            "title": "Source Key",
+            "type": "string"
           }
         },
         "required": [
@@ -446,7 +450,8 @@
           "direction",
           "amount_minor",
           "natural_delta_minor",
-          "created_at"
+          "created_at",
+          "source_key"
         ],
         "title": "StatementLine",
         "type": "object"
@@ -725,7 +730,7 @@
     },
     "/v1/accounts/{account_id}/statement": {
       "get": {
-        "description": "Newest-first postings for an account (and its shards), keyset-paginated by posting ID.",
+        "description": "Newest-first postings for an account (and its shards), keyset-paginated by posting ID.\n\n``source_key`` is the hold's key for postings that came from a captured hold, otherwise the\nentry key, so callers can attribute every posting to its business object.",
         "operationId": "account_statement_v1_accounts__account_id__statement_get",
         "parameters": [
           {
@@ -745,7 +750,7 @@
             "required": false,
             "schema": {
               "default": 100,
-              "maximum": 500,
+              "maximum": 5000,
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
@@ -766,6 +771,40 @@
                 }
               ],
               "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from_time",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From Time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to_time",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To Time"
             }
           }
         ],
