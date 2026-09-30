@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, cast
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Path, Query, Request, status
 from libs.money import MAX_SAFE_INTEGER
+from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from services.ledger.model import Direction
@@ -164,6 +165,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Tally Ledger", version="1.0.0", lifespan=lifespan)
+app.add_middleware(SecurityMiddleware, max_body_bytes=256_000)
 
 
 def _pool(request: Request) -> asyncpg.Pool:

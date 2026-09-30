@@ -16,6 +16,7 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
 
@@ -130,6 +131,7 @@ def create_app(engine: RiskEngine | None = None, internal_key: str | None = None
             await pool.close()
 
     app = FastAPI(title="Tally Risk", version="1.0.0", lifespan=lifespan)
+    app.add_middleware(SecurityMiddleware, max_body_bytes=256_000)
     if engine is not None:
         app.state.risk_engine = engine
     app.state.internal_key = internal_key or ""

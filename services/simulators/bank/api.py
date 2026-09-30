@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 from dataclasses import dataclass, field
@@ -58,6 +59,14 @@ class PayoutResponse(BaseModel):
 
 
 RAIL_MODES = {"approve", "decline", "timeout", "http_500"}
+
+
+class ModeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    modes: dict[str, str] = Field(default_factory=dict)
+    refund_mode: str | None = None
+    payout_mode: str | None = None
 
 
 def utr(seed: str) -> str:
@@ -266,6 +275,39 @@ def create_app(config: BankSimulatorConfig | None = None) -> FastAPI:
     async def payout_status(payout_id: str) -> dict[str, str]:
         current: BankSimulatorConfig = app.state.config
         return {"payout_id": payout_id, "status": current.rail_statuses.get(payout_id, "not_found")}
+
+    @app.post("/internal/v1/modes")
+    async def set_modes(
+        body: ModeUpdate, x_simulator_admin: str = Header(default="")
+    ) -> dict[str, object]:
+        """Chaos control for demos; disabled unless an admin key is configured."""
+        expected = os.environ.get("TALLY_SIMULATOR_ADMIN_KEY", "")
+        if not expected or not hmac.compare_digest(expected, x_simulator_admin):
+            raise HTTPException(401, "simulator admin authentication failed")
+        allowed = {
+            "approve",
+            "decline",
+            "credit_failure",
+            "timeout",
+            "late_success",
+            "status_unknown",
+            "http_500",
+            "reverse_timeout",
+        }
+        if any(mode not in allowed for mode in body.modes.values()) or any(
+            mode is not None and mode not in RAIL_MODES
+            for mode in (body.refund_mode, body.payout_mode)
+        ):
+            raise HTTPException(422, "unknown simulator mode")
+        current: BankSimulatorConfig = app.state.config
+        current.modes = dict(body.modes)
+        current.refund_mode = body.refund_mode or current.refund_mode
+        current.payout_mode = body.payout_mode or current.payout_mode
+        return {
+            "modes": current.modes,
+            "refund_mode": current.refund_mode,
+            "payout_mode": current.payout_mode,
+        }
 
     @app.get("/internal/v1/journal")
     async def journal() -> list[dict[str, object]]:

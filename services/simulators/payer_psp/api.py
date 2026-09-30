@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 from dataclasses import dataclass, field
 from typing import Literal
@@ -60,6 +61,20 @@ def create_app(config: PayerPspConfig | None = None) -> FastAPI:
         )
         config_now.requests[idempotency_key] = (fingerprint, result)
         return result
+
+    @app.post("/internal/v1/modes")
+    async def set_mode(
+        body: dict[str, str | None], x_simulator_admin: str = Header(default="")
+    ) -> dict[str, str]:
+        expected = os.environ.get("TALLY_SIMULATOR_ADMIN_KEY", "")
+        if not expected or not hmac.compare_digest(expected, x_simulator_admin):
+            raise HTTPException(401, "simulator admin authentication failed")
+        mode = body.get("mode")
+        if mode is not None:
+            if mode not in {"approve", "decline", "http_500"}:
+                raise HTTPException(422, "unknown simulator mode")
+            app.state.config.mode = mode
+        return {"mode": app.state.config.mode}
 
     return app
 

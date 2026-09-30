@@ -21,6 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from libs.common.object_store import S3ObjectStore
 from libs.idempotency.store import PostgresIdempotencyStore
+from libs.security.http import SecurityMiddleware
 from libs.security.key_encryption import ApiKeyCipher
 from libs.security.rate_limit import MerchantRateLimiter
 from redis.asyncio import Redis
@@ -41,7 +42,7 @@ from services.core.recovery_worker import (
     process_recovery_batch,
     sweep_stalled_payments,
 )
-from services.core.repository import PaymentIntentRepository
+from services.core.repository import LimitExceeded, PaymentIntentRepository
 from services.core.risk_client import assess_payment_risk
 from services.core.schemas import (
     ConfirmResponse,
@@ -491,6 +492,7 @@ def create_app() -> FastAPI:
             await pool.close()
 
     app = FastAPI(title="Tally Payment API", version="1.0.0", lifespan=lifespan)
+    app.add_middleware(SecurityMiddleware, max_body_bytes=2_000_000)
     app.state.payment_repository = None
     app.state.provisioned_merchants = set()
     app.state.fault_injector = None
@@ -610,6 +612,11 @@ def create_app() -> FastAPI:
                 body,
                 _correlation_id(request),
             )
+        except LimitExceeded as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "MERCHANT_LIMIT_EXCEEDED", "message": str(exc)},
+            ) from exc
         except ValueError as exc:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,

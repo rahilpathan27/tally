@@ -18,7 +18,7 @@ jobs:
       - run: uv sync --all-groups
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run mypy libs services tests
+      - run: uv run mypy libs services tests chaos ml scripts
       - run: uv run python -m libs.money.float_ban
       - run: uv run python -m scripts.export_openapi --check
       - run: uv run python -m scripts.export_core_openapi --check

@@ -67,11 +67,11 @@ def main() -> None:
 
     rows = []
     per_type: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
-    totals = defaultdict(int)
+    totals: defaultdict[str, int] = defaultdict(int)
     for fmt in FORMATS:
         for hard in (False, True):
             for next_day in (True, False):
-                agg = defaultdict(int)
+                agg: defaultdict[str, int] = defaultdict(int)
                 for seed in range(args.seeds):
                     ev, _ = run_case(args.transactions, seed, fmt, hard, next_day, scale=4)
                     agg["planted"] += ev.planted  # type: ignore[attr-defined]

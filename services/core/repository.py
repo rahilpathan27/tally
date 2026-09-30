@@ -13,6 +13,10 @@ from services.core.schemas import CreatePaymentIntent
 from services.core.state_machine import PaymentState, transition_allowed
 
 
+class LimitExceeded(ValueError):
+    """A merchant limit set under maker-checker blocks this payment."""
+
+
 class PaymentIntentRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
@@ -35,6 +39,31 @@ class PaymentIntentRepository:
         }
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.execute("SELECT set_config('app.merchant_id', $1, true)", merchant_id)
+            limits = await connection.fetchrow(
+                "SELECT per_txn_max_minor, daily_max_minor FROM merchant_limits "
+                "WHERE merchant_id = $1",
+                merchant_id,
+            )
+            if limits is not None:
+                if limits["per_txn_max_minor"] and body.amount_minor > limits["per_txn_max_minor"]:
+                    raise LimitExceeded("amount exceeds the merchant's per-payment limit")
+                if limits["daily_max_minor"]:
+                    # Serialise creates for this merchant so concurrent requests cannot both
+                    # pass the daily check.
+                    await connection.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                        f"merchant-daily-limit:{merchant_id}",
+                    )
+                    today = await connection.fetchval(
+                        """SELECT coalesce(sum(amount_minor), 0) FROM payment_intents
+                           WHERE merchant_id = $1 AND status NOT IN ('failed', 'cancelled',
+                                                                     'expired', 'reversed')
+                             AND created_at >= date_trunc('day', clock_timestamp()
+                                 AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata'""",
+                        merchant_id,
+                    )
+                    if int(today) + body.amount_minor > limits["daily_max_minor"]:
+                        raise LimitExceeded("payment would exceed the merchant's daily limit")
             if body.payment_method_type == "upi":
                 if body.payer_vpa == body.payee_vpa:
                     raise ValueError("payer and payee VPAs must be different")

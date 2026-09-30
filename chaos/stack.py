@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 import asyncpg
@@ -335,3 +335,85 @@ async def build_stack(
             if client is not None
         ],
     )
+
+
+@dataclass(slots=True)
+class Backoffice:
+    app: Any
+    client: httpx.AsyncClient
+    cipher: ApiKeyCipher
+    pool: asyncpg.Pool
+
+    async def user(
+        self,
+        email: str,
+        roles: list[str],
+        merchant_id: str | None = None,
+        *,
+        password: str = "correct horse battery staple",
+        mfa: bool = False,
+    ) -> str | None:
+        from scripts.manage_backoffice_users import create_user
+
+        _, secret = await create_user(
+            self.pool, self.cipher, email, password, roles, merchant_id, mfa
+        )
+        return secret
+
+    async def login(
+        self, email: str, password: str = "correct horse battery staple"
+    ) -> httpx.AsyncClient:
+        """A client carrying the user's session cookies and CSRF header."""
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app), base_url="https://console.test"
+        )
+        response = await client.post("/auth/login", json={"email": email, "password": password})
+        response.raise_for_status()
+        client.headers["x-csrf-token"] = response.json()["csrf_token"]
+        return client
+
+
+async def build_backoffice(
+    stack: LocalStack,
+    *,
+    recon_app: Any = None,
+    chaos_enabled: bool = False,
+) -> Backoffice:
+    from libs.security.jwt_tokens import KeyRing
+    from services.backoffice_api.app import configure
+    from services.backoffice_api.app import create_app as create_bff
+
+    app = create_bff()
+    state = stack.core_app.state  # type: ignore[attr-defined]
+    cipher = ApiKeyCipher(b"b" * 32)
+    clients: dict[str, tuple[httpx.AsyncClient, str]] = {
+        "core": (stack.client, state.recovery_key),
+        "ledger": (state.ledger_http, ""),
+        "sim_bank": (state.bank_http, ""),
+        "sim_network": (state.card_network_http, ""),
+        "sim_psp": (state.payer_psp_http, ""),
+    }
+    if stack.risk_app is not None:
+        clients["risk"] = (state.risk_http, state.risk_key)
+    if recon_app is not None:
+        recon_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=recon_app), base_url="http://recon"
+        )
+        stack.clients.append(recon_client)
+        clients["recon"] = (recon_client, "recon-key")
+    configure(
+        app,
+        pool=stack.general_pool,
+        secret_cipher=cipher,
+        api_key_cipher=ApiKeyCipher(b"s" * 32),
+        key_ring=KeyRing.generate(),
+        clients=clients,
+        secure_cookies=True,
+        chaos_enabled=chaos_enabled,
+        simulator_admin_key="stack-sim-admin",
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://console.test"
+    )
+    stack.clients.append(client)
+    return Backoffice(app=app, client=client, cipher=cipher, pool=stack.general_pool)

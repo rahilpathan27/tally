@@ -21,6 +21,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from libs.common.object_store import FilesystemObjectStore, S3ObjectStore
+from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.recon.engine import ReconConfig
@@ -145,6 +146,9 @@ def create_app(ctx: ReconContext | None = None, internal_key: str | None = None)
             await pool.close()
 
     app = FastAPI(title="Tally Reconciliation", version="1.0.0", lifespan=lifespan)
+    app.add_middleware(
+        SecurityMiddleware, raw_body_paths=("/v1/files",), large_body_paths=("/v1/files",)
+    )
     if ctx is not None:
         app.state.recon_ctx = ctx
     app.state.internal_key = internal_key or ""

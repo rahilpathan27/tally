@@ -108,6 +108,23 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
             raise HTTPException(504, "simulated network response lost after authorization")
         return result
 
+    @app.post("/internal/v1/modes")
+    async def set_mode(
+        body: dict[str, str | None], x_simulator_admin: str = Header(default="")
+    ) -> dict[str, str]:
+        expected = os.environ.get("TALLY_SIMULATOR_ADMIN_KEY", "")
+        if not expected or not hmac.compare_digest(expected, x_simulator_admin):
+            raise HTTPException(401, "simulator admin authentication failed")
+        mode = body.get("mode")
+        current: CardNetworkConfig = app.state.config
+        if mode is not None:
+            if mode not in {"approve", "decline", "http_500", "timeout", "late_success"}:
+                raise HTTPException(422, "unknown simulator mode")
+            app.state.config = CardNetworkConfig(
+                current.vault_url, current.vault_network_key, current.service_key, mode
+            )
+        return {"mode": app.state.config.mode}
+
     @app.get("/v1/authorizations/{payment_id}/status")
     async def authorization_status(payment_id: str) -> dict[str, str]:
         return {

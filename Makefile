@@ -1,4 +1,4 @@
-.PHONY: train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: backoffice-api train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
 CHAOS_FLOW_SCENARIOS ?= 2000
@@ -12,7 +12,7 @@ down:
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
-	uv run mypy libs services tests
+	uv run mypy libs services tests chaos ml scripts
 	uv run python -m libs.money.float_ban
 
 test:
@@ -81,7 +81,10 @@ migrate:
 	uv run python -m scripts.migrate gateway core ledger vault recon risk backoffice
 
 stack-test-integration:
-	TALLY_STACK_TESTS=1 TALLY_KAFKA_BOOTSTRAP=127.0.0.1:19092 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py tests/integration/test_money_movement.py tests/integration/test_outbox_kafka.py tests/integration/test_reconciliation.py tests/integration/test_risk_flow.py tests/integration/test_risk_retrain.py tests/integration/test_risk_feature_parity.py
+	TALLY_STACK_TESTS=1 TALLY_KAFKA_BOOTSTRAP=127.0.0.1:19092 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py tests/integration/test_money_movement.py tests/integration/test_outbox_kafka.py tests/integration/test_reconciliation.py tests/integration/test_risk_flow.py tests/integration/test_risk_retrain.py tests/integration/test_risk_feature_parity.py tests/security
+
+backoffice-api:
+	TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally TALLY_INTERNAL_KEY=tally-local-internal TALLY_RECOVERY_KEY=tally-local-recovery TALLY_API_KEY_ENCRYPTION_KEY=$${TALLY_API_KEY_ENCRYPTION_KEY:?set it} TALLY_BACKOFFICE_SECRET_KEY=$${TALLY_BACKOFFICE_SECRET_KEY:?set it} uv run uvicorn services.backoffice_api.app:app --host 127.0.0.1 --port 8040
 
 recon-api:
 	TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally TALLY_INTERNAL_KEY=tally-local-internal TALLY_S3_ENDPOINT=http://127.0.0.1:8333 uv run uvicorn services.recon.api:app --host 127.0.0.1 --port 8020

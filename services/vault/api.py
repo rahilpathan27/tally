@@ -18,6 +18,7 @@ from fastapi import FastAPI, Header, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from libs.security.envelope_encryption import EnvelopeCipher
+from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from services.vault.model import PUBLISHED_TEST_PANS, TokenMetadata, validate_test_card
@@ -118,6 +119,7 @@ def create_app() -> FastAPI:
             await pool.close()
 
     app = FastAPI(title="Tally Vault", version="1.0.0", lifespan=lifespan)
+    app.add_middleware(SecurityMiddleware, max_body_bytes=16_000)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(

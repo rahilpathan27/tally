@@ -377,6 +377,64 @@ async def cancel_refund_route(refund_id: ResourceId, request: Request) -> Refund
     return refund_response(row)
 
 
+class InternalRefund(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    merchant_id: Annotated[str, Field(min_length=1, max_length=64)]
+    payment_id: UUID = Field(strict=False)
+    amount_minor: Annotated[int, Field(gt=0, le=9_007_199_254_740_991)] | None = None
+    reason: Annotated[str, Field(max_length=200)] | None = None
+
+
+@internal_router.post("/internal/v1/refunds", response_model=RefundResponse, status_code=201)
+async def internal_refund(body: InternalRefund, request: Request) -> RefundResponse:
+    """Refund created from the back office (after maker-checker when above threshold)."""
+    require_internal(request)
+    actor = request.headers.get("x-actor", "backoffice")
+    async with _domain_errors():
+        row = await create_refund(
+            _ctx(request),
+            body.merchant_id,
+            CreateRefund(
+                payment_id=body.payment_id, amount_minor=body.amount_minor, reason=body.reason
+            ),
+            actor,
+        )
+    return refund_response(row)
+
+
+class InternalEvidence(SubmitEvidence):
+    merchant_id: Annotated[str, Field(min_length=1, max_length=64)]
+
+
+@internal_router.post("/internal/v1/disputes/{dispute_id}/evidence", response_model=DisputeView)
+async def internal_evidence(
+    dispute_id: ResourceId, body: InternalEvidence, request: Request
+) -> DisputeView:
+    require_internal(request)
+    evidence = SubmitEvidence(
+        text=body.text, document_base64=body.document_base64, document_name=body.document_name
+    )
+    async with _domain_errors():
+        row = await submit_evidence(
+            _ctx(request), body.merchant_id, dispute_id, evidence, _object_writer(request)
+        )
+    return dispute_view(row)
+
+
+@internal_router.get("/internal/v1/switch/state")
+async def switch_state(request: Request) -> dict[str, Any]:
+    """Circuit-breaker state for the ops switch monitor (process-local breakers)."""
+    require_internal(request)
+    state = request.app.state
+    out: dict[str, Any] = {}
+    for name in ("bank_breaker", "card_network_breaker"):
+        breaker = getattr(state, name, None)
+        if breaker is not None:
+            out[name] = {"open": breaker.is_open, "failures": breaker.failures}
+    return out
+
+
 async def run_money_workers(state: Any, *, settle: bool = False) -> dict[str, int]:
     """One pass of every Phase 8 background worker (also used by tests and demos)."""
     ctx: MoneyContext = state.money_ctx
