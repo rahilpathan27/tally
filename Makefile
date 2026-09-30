@@ -108,5 +108,8 @@ seed: ledger-migrate core-migrate
 	docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < services/ledger/seeds/001_local_chart.sql
 	docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/seeds/001_local_vpas.sql
 
-simulate train loadtest chaos demo deploy-dev destroy-dev:
+chaos:
+	uv run python -m chaos.chaos_sim
+
+simulate train loadtest demo deploy-dev destroy-dev:
 	@echo "$@ is not available yet. See docs/PROGRESS.md for implementation status."

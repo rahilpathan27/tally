@@ -14,6 +14,7 @@
 - Phase 5 payment orchestrator: signed, scoped merchant routes create, retrieve, confirm, capture, and cancel payment intents. The table-driven state machine records accepted and rejected transitions in append-only history. Each accepted state change writes its outbox event and any deterministic ledger command in the same transaction. Card-token authorization goes through the network simulator and vault, then uses a ledger hold for capture/void. UPI VPA resolution selects the registered bank IDs, and payer PSP/bank simulator responses lead to one deterministic ledger posting.
 - Phase 5 simulators: separate loopback APIs provide configurable card-network, payer PSP, and multi-bank outcomes. Bank messages and PSP approvals replay by idempotency key within the running simulator process. The message shapes are simplified, local examples, not NPCI protocol messages.
 - Phase 6 simulator outcome recovery: a leased worker checks card-network and bank status with exponential backoff and separate process-local circuit breakers. Per-bank, amount-tier PostgreSQL policies snapshot a 30-second default UPI decision deadline, 10-minute late-success watch and either `auto_reverse` or `deemed_success`. It handles lost card approvals, late card approval after a deemed reversal by creating and voiding the hold, lost UPI approval responses, debit-success/credit-failure reversal, and UPI late success after a deemed reversal by posting a deterministic correcting entry to suspense with an immutable incident and outbox event.
+- Phase 7 failure-injection harness: a fixed-seed chaos simulator injects pre-commit drops, lost acknowledgements, duplicate deliveries, and repeated hold capture/void requests. An independent checker validates the journal hash chain, per-currency balance, hold references, and non-negative posted/available balances after every scenario.
 - Added ADRs 001–009 covering money, ledger locking and reservations, local object storage, tokenization, and payment orchestration, alongside ledger design and guarantees documentation.
 
 ## Verified
@@ -34,6 +35,7 @@
 - Phase 6 integration coverage passes for direct card/PSP/bank declines without ledger effects, card authorization response loss and capture after recovery, card late authorization corrected by voiding its hold, UPI unknown then approved, auto-reverse after status deadline, late success corrected to suspense, configured deemed success, and debit-success/credit-failure with a lost reversal response. Concurrent recovery claims produce one resolution. Recovery outcomes and command completion are transactionally recorded; deterministic ledger keys make retries safe after a crash.
 - Payment state-machine tests cover allowed and illegal edges; simulator tests cover bank decline, timeout and outage modes, payer decline, card-network outage, and idempotent bank replay/conflict.
 - `make openapi` exports both the ledger and merchant payment API contracts; both drift checks pass.
+- `make chaos` passes 100,000 seeded scenarios (seed `7310026`): 16,544 pre-commit drops, 16,598 lost acknowledgements with replay, 16,646 duplicate deliveries, 33,473 hold void scenarios, and 16,739 hold capture scenarios. The checker ran after every scenario; see [docs/chaos-report.md](chaos-report.md).
 
 ## Known gaps
 
@@ -44,7 +46,7 @@
 - Vault encryption currently uses a locally supplied AES-GCM KEK, and simulator identity uses a local shared credential rather than mTLS. No production KMS, certificate identity, key lifecycle, external audit anchoring, or real card-data support is implemented.
 - Snapshot tables exist and the Python model can snapshot/as-of, but there is no scheduled PostgreSQL snapshot writer, DB as-of query, or independent verifier worker.
 - No ledger throughput/latency benchmark has been measured. The global chain-head lock serializes database writes.
-- Later phases remain unimplemented: recovery/chaos harness, refunds/settlements/webhooks, reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports.
+- Later phases remain unimplemented: refunds/settlements/webhooks, reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports. Phase 7 currently injects deterministic in-memory ledger faults; service-process termination and real network chaos remain future coverage.
 - SeaweedFS is an S3-compatible local substitution for the inaccessible pinned MinIO image. Its S3 endpoint is unauthenticated and loopback-only; it does not provide production Object Lock guarantees.
 - GitHub Actions has not run on a hosted runner. Only the same local lint/type/test commands were run.
 

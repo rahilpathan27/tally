@@ -21,7 +21,10 @@ make gateway-test-integration
 make vault-migrate
 make vault-test-integration
 make core-test-integration
+make chaos
 ```
+
+`make chaos` runs the seeded 100,000-scenario failure-injection harness. See [docs/chaos-report.md](docs/chaos-report.md) for its current coverage and limits.
 
 The local gateway key CLI creates a merchant and prints the generated secret once. Set `TALLY_DATABASE_URL` to the general PostgreSQL database and `TALLY_API_KEY_ENCRYPTION_KEY` to a separately managed base64-encoded 32-byte key before use:
 
