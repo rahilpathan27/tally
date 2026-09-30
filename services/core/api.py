@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import hmac
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 from uuid import UUID, uuid4
 
@@ -25,9 +29,11 @@ from redis.asyncio import Redis
 
 from services.api_gateway.auth import MerchantHmacAuth, MerchantPrincipal
 from services.api_gateway.route import GatewayRoute, requires_scope
+from services.core.recovery import CircuitBreaker, recovery_delay_seconds
 from services.core.state_machine import PaymentState, transition_allowed
 
 PaymentId = Annotated[UUID, Path()]
+logger = logging.getLogger(__name__)
 Vpa = Annotated[
     str,
     StringConstraints(
@@ -154,6 +160,7 @@ class PaymentIntentRepository:
         *,
         command: tuple[str, str, dict[str, object]] | None = None,
         extra_update: dict[str, object] | None = None,
+        completed_command: tuple[str, dict[str, object], bool] | None = None,
     ) -> tuple[bool, PaymentState, asyncpg.Record | None]:
         accepted = False
         current = target
@@ -186,12 +193,55 @@ class PaymentIntentRepository:
             )
             if accepted:
                 await connection.execute(
-                    """UPDATE payment_intents SET status = $3, updated_at = clock_timestamp()
+                    """UPDATE payment_intents SET status = $3, updated_at = clock_timestamp(),
+                           recovery_lease_until = NULL
                        WHERE payment_id = $1 AND merchant_id = $2""",
                     payment_id,
                     merchant_id,
                     target.value,
                 )
+                if target == PaymentState.PENDING_UNKNOWN:
+                    await connection.execute(
+                        """WITH selected_policy AS (
+                               SELECT p.payment_id,
+                                      COALESCE(policy.status_check_deadline_seconds, 30)
+                                          AS deadline,
+                                      COALESCE(policy.deemed_outcome, 'auto_reverse') AS outcome,
+                                      COALESCE(policy.late_success_window_seconds, 600) AS window
+                               FROM payment_intents p
+                               LEFT JOIN core_vpas payer ON payer.vpa = p.payer_vpa
+                               LEFT JOIN LATERAL (
+                                   SELECT * FROM core_bank_recovery_policies candidate
+                                   WHERE candidate.bank_id = payer.bank_id
+                                     AND candidate.min_amount_minor <= p.amount_minor
+                                     AND (candidate.max_amount_minor IS NULL
+                                       OR candidate.max_amount_minor >= p.amount_minor)
+                                   ORDER BY candidate.min_amount_minor DESC LIMIT 1
+                               ) policy ON true
+                               WHERE p.payment_id = $1 AND p.merchant_id = $2
+                           )
+                           UPDATE payment_intents p
+                           SET recovery_attempts = 0,
+                               next_recovery_at = clock_timestamp(),
+                               recovery_deadline = clock_timestamp() + make_interval(
+                                   secs => selected_policy.deadline::double precision),
+                               recovery_policy = selected_policy.outcome,
+                               late_success_window_seconds = selected_policy.window
+                           FROM selected_policy
+                           WHERE p.payment_id = selected_policy.payment_id""",
+                        payment_id,
+                        merchant_id,
+                    )
+                if target == PaymentState.REVERSED:
+                    await connection.execute(
+                        """UPDATE payment_intents
+                           SET late_success_until = clock_timestamp() + make_interval(
+                                   secs => late_success_window_seconds::double precision),
+                               next_recovery_at = clock_timestamp() + interval '5 seconds'
+                           WHERE payment_id = $1 AND merchant_id = $2""",
+                        payment_id,
+                        merchant_id,
+                    )
                 payload: dict[str, object] = {
                     "payment_id": str(payment_id),
                     "merchant_id": merchant_id,
@@ -218,6 +268,16 @@ class PaymentIntentRepository:
                         operation,
                         idempotency_key,
                         json.dumps(command_request, separators=(",", ":")),
+                    )
+                if completed_command is not None:
+                    idempotency_key, result, skipped = completed_command
+                    await connection.execute(
+                        """UPDATE core_ledger_commands SET state = $2, result = $3::jsonb,
+                               completed_at = clock_timestamp()
+                           WHERE idempotency_key = $1""",
+                        idempotency_key,
+                        "skipped" if skipped else "completed",
+                        json.dumps(result, separators=(",", ":")),
                     )
                 if extra_update:
                     await connection.execute(
@@ -255,6 +315,107 @@ class PaymentIntentRepository:
                    WHERE p.payment_id = $1 AND p.merchant_id = $2""",
                 payment_id,
                 merchant_id,
+            )
+
+    async def pending_recovery(self, limit: int = 100) -> list[asyncpg.Record]:
+        async with self.pool.acquire() as connection, connection.transaction():
+            rows = await connection.fetch(
+                """SELECT p.payment_id, p.merchant_id, p.status, p.recovery_attempts,
+                          p.recovery_deadline, p.late_success_until,
+                          p.recovery_deadline <= clock_timestamp() AS deadline_elapsed,
+                          p.amount_minor, p.currency, p.payment_method_type, p.recovery_policy,
+                          c.idempotency_key, c.request
+                   FROM payment_intents p
+                   JOIN core_ledger_commands c ON c.payment_id = p.payment_id
+                   WHERE ((p.payment_method_type = 'upi' AND c.operation = 'post_entry'
+                           AND ((p.status IN ('pending_unknown', 'reversal_pending')
+                                 AND c.state = 'pending')
+                             OR (p.status = 'reversed' AND c.state = 'pending'
+                                 AND p.late_success_until IS NOT NULL)))
+                       OR (p.payment_method_type = 'card' AND c.operation = 'place_hold'
+                           AND p.status = 'pending_unknown' AND c.state = 'pending'))
+                     AND (p.next_recovery_at IS NULL OR p.next_recovery_at <= clock_timestamp())
+                     AND (p.recovery_lease_until IS NULL
+                       OR p.recovery_lease_until <= clock_timestamp())
+                   ORDER BY p.next_recovery_at NULLS FIRST, p.created_at
+                   FOR UPDATE OF p SKIP LOCKED LIMIT $1""",
+                limit,
+            )
+            if rows:
+                await connection.execute(
+                    """UPDATE payment_intents SET recovery_lease_until =
+                           clock_timestamp() + interval '30 seconds'
+                       WHERE payment_id = ANY($1::uuid[])""",
+                    [row["payment_id"] for row in rows],
+                )
+            return cast(list[asyncpg.Record], rows)
+
+    async def reschedule_recovery(self, payment_id: UUID, attempts: int) -> None:
+        delay_seconds = recovery_delay_seconds(attempts)
+        await self.pool.execute(
+            """UPDATE payment_intents SET recovery_attempts = $2,
+                   next_recovery_at = clock_timestamp() + ($3 * interval '1 second'),
+                   updated_at = clock_timestamp(), recovery_lease_until = NULL
+               WHERE payment_id = $1 AND status IN ('pending_unknown', 'reversed')""",
+            payment_id,
+            attempts,
+            delay_seconds,
+        )
+
+    async def close_late_success_watch(self, payment_id: UUID) -> None:
+        await self.pool.execute(
+            """UPDATE payment_intents SET late_success_until = NULL,
+                   recovery_lease_until = NULL WHERE payment_id = $1""",
+            payment_id,
+        )
+
+    async def record_late_success(
+        self,
+        payment_id: UUID,
+        merchant_id: str,
+        bank_status: str,
+        correction_entry_id: str,
+        original_command_key: str,
+        correction_result: dict[str, object],
+    ) -> None:
+        async with self.pool.acquire() as connection, connection.transaction():
+            incident_id = await connection.fetchval(
+                """INSERT INTO core_recovery_incidents(
+                       payment_id, merchant_id, incident_type, bank_status, correction_entry_id
+                   ) VALUES ($1, $2, 'late_success_after_reversal', $3, $4)
+                   ON CONFLICT (payment_id, incident_type) DO NOTHING
+                   RETURNING incident_id""",
+                payment_id,
+                merchant_id,
+                bank_status,
+                int(correction_entry_id),
+            )
+            if incident_id is not None:
+                await connection.execute(
+                    """INSERT INTO core_outbox(aggregate_id, merchant_id, event_type, payload)
+                       VALUES ($1, $2, 'payment_intent.late_success_after_reversal', $3::jsonb)""",
+                    payment_id,
+                    merchant_id,
+                    json.dumps(
+                        {
+                            "payment_id": str(payment_id),
+                            "merchant_id": merchant_id,
+                            "bank_status": bank_status,
+                            "correction_entry_id": correction_entry_id,
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            await connection.execute(
+                """UPDATE core_ledger_commands SET state = 'completed', result = $2::jsonb,
+                       completed_at = clock_timestamp() WHERE idempotency_key = $1""",
+                original_command_key,
+                json.dumps(correction_result, separators=(",", ":")),
+            )
+            await connection.execute(
+                """UPDATE payment_intents SET late_success_until = NULL,
+                       recovery_lease_until = NULL WHERE payment_id = $1""",
+                payment_id,
             )
 
 
@@ -296,6 +457,239 @@ def _validate_ledger_response(response: httpx.Response) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+async def process_recovery_batch(
+    repository: PaymentIntentRepository,
+    bank_http: httpx.AsyncClient,
+    ledger_http: httpx.AsyncClient,
+    breaker: CircuitBreaker,
+    *,
+    network_http: httpx.AsyncClient | None = None,
+    network_breaker: CircuitBreaker | None = None,
+    limit: int = 100,
+) -> int:
+    """Resolve due UPI unknowns from authoritative simulator status responses."""
+    processed = 0
+    for row in await repository.pending_recovery(limit):
+        if row["status"] == PaymentState.REVERSED.value and row[
+            "late_success_until"
+        ] <= datetime.now(UTC):
+            await repository.close_late_success_watch(row["payment_id"])
+            continue
+        payment_id = row["payment_id"]
+        call_breaker = network_breaker or breaker
+        if row["payment_method_type"] != "card":
+            call_breaker = breaker
+        if not call_breaker.allow_request():
+            break
+        status_client = network_http if row["payment_method_type"] == "card" else bank_http
+        if status_client is None:
+            await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+            continue
+        status_path = (
+            f"/v1/authorizations/{payment_id}/status"
+            if row["payment_method_type"] == "card"
+            else f"/v1/transfers/{payment_id}/status"
+        )
+        try:
+            response = await status_client.get(status_path)
+            response.raise_for_status()
+            bank_status = response.json().get("status")
+            call_breaker.record_success()
+        except (httpx.HTTPError, ValueError):
+            call_breaker.record_failure()
+            await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+            continue
+
+        correlation_id = str(payment_id)
+        if bank_status == "declined" and row["status"] == PaymentState.PENDING_UNKNOWN.value:
+            await repository.transition(
+                payment_id,
+                row["merchant_id"],
+                PaymentState.FAILED,
+                "recovery-worker",
+                "status check confirmed the external authorization was declined",
+                correlation_id,
+                completed_command=(row["idempotency_key"], {"status": "declined"}, True),
+            )
+            processed += 1
+            continue
+
+        if bank_status == "debit_succeeded_credit_failed":
+            try:
+                reversal = await bank_http.post(f"/v1/transfers/{payment_id}/reverse")
+                reversal.raise_for_status()
+                bank_status = reversal.json().get("status")
+            except (httpx.HTTPError, ValueError):
+                await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+                continue
+
+        if bank_status == "reversed" and row["status"] != PaymentState.REVERSED.value:
+            final_state = (
+                PaymentState.REVERSED
+                if row["status"] == PaymentState.REVERSAL_PENDING.value
+                else PaymentState.FAILED
+            )
+            accepted, _, _ = await repository.transition(
+                payment_id,
+                row["merchant_id"],
+                final_state,
+                "recovery-worker",
+                "bank debit leg was reversed after the credit leg failed",
+                correlation_id,
+                completed_command=(row["idempotency_key"], {"status": "reversed"}, True),
+            )
+            if accepted:
+                processed += 1
+            continue
+
+        if bank_status == "approved":
+            command_request = row["request"]
+            if isinstance(command_request, str):
+                command_request = json.loads(command_request)
+            if row["payment_method_type"] == "card":
+                try:
+                    ledger_result = _validate_ledger_response(
+                        await ledger_http.post("/v1/holds", json=command_request)
+                    )
+                except (httpx.HTTPError, HTTPException):
+                    await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+                    continue
+                accepted, _, _ = await repository.transition(
+                    payment_id,
+                    row["merchant_id"],
+                    PaymentState.AUTHORIZED,
+                    "recovery-worker",
+                    "card network status confirmed authorization; ledger hold placed",
+                    correlation_id,
+                    extra_update={"ledger_hold_id": int(cast(str, ledger_result["hold_id"]))},
+                    completed_command=(row["idempotency_key"], ledger_result, False),
+                )
+                if accepted:
+                    processed += 1
+                continue
+            late_success = row["status"] == PaymentState.REVERSED.value
+            if late_success:
+                corrected_request = dict(cast(dict[str, object], command_request))
+                corrected_request["idempotency_key"] = (
+                    f"{row['idempotency_key']}:late-success-correction"
+                )
+                postings = cast(list[dict[str, object]], corrected_request["postings"])
+                postings[1] = {**postings[1], "account_id": "platform:suspense:INR"}
+            else:
+                corrected_request = cast(dict[str, object], command_request)
+            try:
+                ledger_result = _validate_ledger_response(
+                    await ledger_http.post("/v1/entries", json=corrected_request)
+                )
+            except (httpx.HTTPError, HTTPException):
+                await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+                continue
+            if late_success:
+                await repository.record_late_success(
+                    payment_id,
+                    row["merchant_id"],
+                    str(bank_status),
+                    str(ledger_result["entry_id"]),
+                    row["idempotency_key"],
+                    {"status": "late_success_corrected_to_suspense", **ledger_result},
+                )
+                processed += 1
+                continue
+            accepted, _, _ = await repository.transition(
+                payment_id,
+                row["merchant_id"],
+                PaymentState.SUCCEEDED,
+                "recovery-worker",
+                "bank status check confirmed transfer success",
+                correlation_id,
+                completed_command=(row["idempotency_key"], ledger_result, False),
+            )
+            if accepted:
+                processed += 1
+            continue
+
+        if row["status"] == PaymentState.REVERSED.value:
+            if row["late_success_until"] <= datetime.now(UTC):
+                await repository.close_late_success_watch(payment_id)
+            else:
+                await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+            continue
+
+        if bank_status == "unknown" and row["deadline_elapsed"]:
+            if row["recovery_policy"] == "deemed_success":
+                command_request = row["request"]
+                if isinstance(command_request, str):
+                    command_request = json.loads(command_request)
+                ledger_endpoint = (
+                    "/v1/holds" if row["payment_method_type"] == "card" else "/v1/entries"
+                )
+                try:
+                    ledger_result = _validate_ledger_response(
+                        await ledger_http.post(ledger_endpoint, json=command_request)
+                    )
+                except (httpx.HTTPError, HTTPException):
+                    await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+                    continue
+                is_card = row["payment_method_type"] == "card"
+                accepted, _, _ = await repository.transition(
+                    payment_id,
+                    row["merchant_id"],
+                    PaymentState.AUTHORIZED if is_card else PaymentState.SUCCEEDED,
+                    "recovery-worker",
+                    "bank status remained unknown at deadline; "
+                    "configured deemed-success policy applied",
+                    correlation_id,
+                    extra_update=(
+                        {"ledger_hold_id": int(cast(str, ledger_result["hold_id"]))}
+                        if is_card
+                        else None
+                    ),
+                    completed_command=(row["idempotency_key"], ledger_result, False),
+                )
+                if accepted:
+                    processed += 1
+                continue
+            if row["recovery_policy"] != "auto_reverse":
+                await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+                continue
+
+        if bank_status == "declined" or (
+            row["deadline_elapsed"]
+            and (
+                bank_status == "not_found"
+                or (bank_status == "unknown" and row["recovery_policy"] == "auto_reverse")
+            )
+        ):
+            reversal_state = (
+                PaymentState.REVERSED
+                if row["status"] == PaymentState.REVERSAL_PENDING.value
+                else PaymentState.REVERSAL_PENDING
+            )
+            accepted, _, _ = await repository.transition(
+                payment_id,
+                row["merchant_id"],
+                reversal_state,
+                "recovery-worker",
+                "deemed no-transfer after status check deadline",
+                correlation_id,
+            )
+            if accepted:
+                if reversal_state == PaymentState.REVERSAL_PENDING:
+                    await repository.transition(
+                        payment_id,
+                        row["merchant_id"],
+                        PaymentState.REVERSED,
+                        "recovery-worker",
+                        "no bank debit was recorded; no ledger transfer was posted",
+                        correlation_id,
+                    )
+                processed += 1
+            continue
+
+        await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
+    return processed
+
+
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -333,9 +727,36 @@ def create_app() -> FastAPI:
         )
         app.state.network_simulator_key = os.environ.get("TALLY_NETWORK_SIMULATOR_KEY", "")
         app.state.ledger_provisioning_key = os.environ.get("TALLY_LEDGER_INTERNAL_KEY", "")
+        app.state.recovery_key = os.environ.get("TALLY_RECOVERY_KEY", "")
+        app.state.bank_breaker = CircuitBreaker()
+        app.state.card_network_breaker = CircuitBreaker()
+
+        async def recovery_loop() -> None:
+            while True:
+                try:
+                    await process_recovery_batch(
+                        app.state.payment_repository,
+                        app.state.bank_http,
+                        app.state.ledger_http,
+                        app.state.bank_breaker,
+                        network_http=app.state.card_network_http,
+                        network_breaker=app.state.card_network_breaker,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("payment recovery cycle failed")
+                await asyncio.sleep(1)
+
+        recovery_task = asyncio.create_task(recovery_loop())
         try:
             yield
         finally:
+            recovery_task.cancel()
+            try:
+                await recovery_task
+            except asyncio.CancelledError:
+                pass
             await app.state.ledger_http.aclose()
             await app.state.bank_http.aclose()
             await app.state.payer_psp_http.aclose()
@@ -357,6 +778,22 @@ def create_app() -> FastAPI:
     @app.get("/health/live", include_in_schema=False)
     async def live() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/internal/v1/recovery/run", include_in_schema=False)
+    async def run_recovery(request: Request) -> dict[str, int]:
+        expected = request.app.state.recovery_key
+        provided = request.headers.get("x-recovery-key", "")
+        if not expected or not hmac.compare_digest(provided, expected):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid recovery credential")
+        processed = await process_recovery_batch(
+            _repository(request),
+            request.app.state.bank_http,
+            request.app.state.ledger_http,
+            request.app.state.bank_breaker,
+            network_http=request.app.state.card_network_http,
+            network_breaker=request.app.state.card_network_breaker,
+        )
+        return {"processed": processed}
 
     app.router.route_class = GatewayRoute
 
@@ -463,6 +900,17 @@ def create_app() -> FastAPI:
 
         if payment_method == "card":
             network: httpx.AsyncClient = request.app.state.card_network_http
+            network_breaker: CircuitBreaker = request.app.state.card_network_breaker
+            if not network_breaker.allow_request():
+                await _repository(request).transition(
+                    payment_id,
+                    principal.merchant_id,
+                    PaymentState.PENDING_UNKNOWN,
+                    principal.key_id,
+                    "card-network circuit breaker is open before dispatch",
+                    _correlation_id(request),
+                )
+                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
             try:
                 simulator_response = await network.post(
                     "/v1/authorizations",
@@ -478,14 +926,18 @@ def create_app() -> FastAPI:
                     },
                 )
                 simulator_response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={
-                        "code": "CARD_NETWORK_UNAVAILABLE",
-                        "message": "Card authorization is unavailable.",
-                    },
-                ) from exc
+                network_breaker.record_success()
+            except httpx.HTTPError:
+                network_breaker.record_failure()
+                await _repository(request).transition(
+                    payment_id,
+                    principal.merchant_id,
+                    PaymentState.PENDING_UNKNOWN,
+                    principal.key_id,
+                    "card network response was unavailable; outcome requires status check",
+                    _correlation_id(request),
+                )
+                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
             simulator_result = simulator_response.json()
             if simulator_result.get("status") != "approved":
                 await _repository(request).complete_command(
@@ -535,6 +987,17 @@ def create_app() -> FastAPI:
                 )
                 return ConfirmResponse(payment_id=payment_id, status="failed")
             bank: httpx.AsyncClient = request.app.state.bank_http
+            breaker: CircuitBreaker = request.app.state.bank_breaker
+            if not breaker.allow_request():
+                await _repository(request).transition(
+                    payment_id,
+                    principal.merchant_id,
+                    PaymentState.PENDING_UNKNOWN,
+                    "payment-orchestrator",
+                    "bank circuit breaker is open before transfer dispatch",
+                    _correlation_id(request),
+                )
+                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
             try:
                 transfer_response = await bank.post(
                     "/v1/transfers",
@@ -548,18 +1011,44 @@ def create_app() -> FastAPI:
                     headers={"Idempotency-Key": f"{payment_id}:upi:bank:transfer"},
                 )
                 transfer_response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={
-                        "code": "BANK_SIMULATOR_UNAVAILABLE",
-                        "message": "Bank transfer is unavailable.",
-                    },
-                ) from exc
-            if transfer_response.json().get("status") != "approved":
-                await _repository(request).complete_command(
-                    ledger_key, {"status": "bank_declined"}, skipped=True
+                breaker.record_success()
+            except httpx.HTTPError:
+                breaker.record_failure()
+                await _repository(request).transition(
+                    payment_id,
+                    principal.merchant_id,
+                    PaymentState.PENDING_UNKNOWN,
+                    "payment-orchestrator",
+                    "bank response was unavailable; outcome requires status check",
+                    _correlation_id(request),
                 )
+                return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+            transfer_status = transfer_response.json().get("status")
+            if transfer_status == "debit_succeeded_credit_failed":
+                try:
+                    reversal_response = await bank.post(f"/v1/transfers/{payment_id}/reverse")
+                    reversal_response.raise_for_status()
+                except httpx.HTTPError:
+                    await _repository(request).transition(
+                        payment_id,
+                        principal.merchant_id,
+                        PaymentState.PENDING_UNKNOWN,
+                        "payment-orchestrator",
+                        "debit succeeded but credit failed; reversal result is unknown",
+                        _correlation_id(request),
+                    )
+                    return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
+                await _repository(request).transition(
+                    payment_id,
+                    principal.merchant_id,
+                    PaymentState.FAILED,
+                    "bank-simulator",
+                    "credit leg failed and debit leg was reversed",
+                    _correlation_id(request),
+                    completed_command=(ledger_key, {"status": "reversed"}, True),
+                )
+                return ConfirmResponse(payment_id=payment_id, status="failed")
+            if transfer_status != "approved":
                 await _repository(request).transition(
                     payment_id,
                     principal.merchant_id,
@@ -567,6 +1056,7 @@ def create_app() -> FastAPI:
                     "bank-simulator",
                     "simulated bank declined the transfer",
                     _correlation_id(request),
+                    completed_command=(ledger_key, {"status": "bank_declined"}, True),
                 )
                 return ConfirmResponse(payment_id=payment_id, status="failed")
         ledger: httpx.AsyncClient = request.app.state.ledger_http

@@ -45,8 +45,8 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
             service_key=os.environ.get("TALLY_NETWORK_SIMULATOR_KEY", ""),
             mode=os.environ.get("TALLY_CARD_NETWORK_MODE", "approve"),
         )
-    if config.mode not in {"approve", "decline", "http_500"}:
-        raise RuntimeError("card network mode must be approve, decline, or http_500")
+    if config.mode not in {"approve", "decline", "http_500", "timeout", "late_success"}:
+        raise RuntimeError("unsupported card network simulator mode")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -60,6 +60,7 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
     app = FastAPI(title="Tally Card Network Simulator", version="1.0.0", lifespan=lifespan)
     app.state.config = config
     app.state.requests = {}
+    app.state.statuses = {}
 
     @app.get("/health/live", include_in_schema=False)
     async def live() -> dict[str, str]:
@@ -98,11 +99,21 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
         if not isinstance(pan, str) or not luhn_valid(pan):
             raise HTTPException(422, "vault returned an invalid test card")
         result = AuthorizationResponse(
-            status="approved" if current.mode == "approve" else "declined",
+            status="declined" if current.mode == "decline" else "approved",
             network_reference=f"net_{body.payment_id}",
         )
         requests[idempotency_key] = (fingerprint, result)
+        app.state.statuses[body.payment_id] = result.status
+        if current.mode in {"timeout", "late_success"}:
+            raise HTTPException(504, "simulated network response lost after authorization")
         return result
+
+    @app.get("/v1/authorizations/{payment_id}/status")
+    async def authorization_status(payment_id: str) -> dict[str, str]:
+        return {
+            "payment_id": payment_id,
+            "status": app.state.statuses.get(payment_id, "not_found"),
+        }
 
     return app
 

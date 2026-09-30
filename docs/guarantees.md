@@ -24,7 +24,7 @@ The local vault accepts only PANs configured on its published-test allowlist tha
 
 This is a local simulation boundary. A static shared credential stands in for simulator mTLS, and the local KEK stands in for managed KMS. Compose networking and process-local access controls are not a production network security claim. Do not use real PAN or CVV.
 
-The Phase 5 orchestrator and transactional outbox are implemented, but no recovery worker exists yet. Crash windows are described below and require the Phase 6 recovery and failure-matrix work.
+The Phase 5 orchestrator and transactional outbox are implemented. Phase 6 adds a database-backed recovery loop for card-network authorization and the UPI simulator path. Crash windows and the simulator assumptions are described below.
 
 ## Payment orchestration (Phase 5)
 
@@ -32,17 +32,23 @@ The payment API authenticates merchant mutations through the Phase 3 HMAC route 
 
 The verified card flow is `created → authorizing → authorized → capturing → succeeded`; authorization places a ledger hold, capture posts it, and cancellation voids an authorized hold. The verified UPI flow resolves registered payer/payee VPAs, receives payer PSP approval, obtains approval from both simulated banks, then submits a deterministic ledger posting. The simulators support decline, timeout, and outage controls; bank and PSP messages carry deterministic idempotency keys. State transition logs and outbox payloads contain no PAN. The core hashes caller-supplied request IDs before storing them.
 
-| External result | Current Phase 5 behavior | Ledger effect |
+| External result | Phase 6 behavior | Ledger effect |
 | --- | --- | --- |
 | Card network approves | `authorized`; merchant may capture or cancel | Place hold, then post on capture or void on cancel |
 | Card network declines | `failed` | No hold |
+| Card authorization response is lost | Worker checks network status; on approval it places the stored deterministic hold and returns to `authorized` | A retry reuses the same hold idempotency key |
 | UPI payer PSP declines | `failed` | No posting |
 | Either UPI bank declines | `failed` | No posting |
 | Both UPI banks approve | `succeeded` | One idempotent transfer posting |
-| Simulator or ledger request times out / returns an error | Payment remains at its last persisted in-flight state with a pending command | A deterministic ledger key permits replay; no worker resolves the command yet |
+| Bank response is lost after approval | Payment enters `pending_unknown`; a leased recovery worker checks bank status with exponential backoff and posts using the stored deterministic command when approved | Repeated ledger requests return the original journal entry |
+| Bank status is `not_found` after the captured deadline | Payment advances through `reversal_pending` to `reversed`; the command is not posted | No ledger entry, because the simulator reports no debit |
+| Bank status stays unknown at deadline | Per-bank, amount-tier policy applies `auto_reverse` or `deemed_success`; default is `auto_reverse` | Either no posting, or the same deterministic UPI transfer posting under the opted-in deemed-success policy |
+| Debit succeeds, credit fails | Bank simulator reverses the debit. If its response is lost, recovery checks status and completes the payment as failed once reversal is confirmed | No payment entry is posted for a confirmed reversal |
+| Bank reports success during the configured late-success window after reversal | Recovery posts the bank movement to `platform:suspense:INR`, writes an immutable recovery incident and outbox event, and keeps the payment reversed for reconciliation | A deterministic correction entry records the observed bank movement without re-crediting the merchant |
+| Bank or ledger status check is unavailable | Circuit breaker limits calls; leased command remains eligible for retry after exponential delay | No new ledger effect until a response is resolved |
 
-There is no distributed transaction across the general database, ledger, vault, or simulators. The durable command is written before an external ledger call. If the process stops after the ledger commits but before the core stores the response, the deterministic ledger key or immutable hold ID allows the request to be replayed without creating another entry. If a bank or PSP response is lost, the current service does not check transaction status; recovery and deemed outcomes are Phase 6. Simulator idempotency caches are in memory and do not survive simulator restarts. Outbox events remain stored but are not yet published to Redpanda.
+There is no distributed transaction across the general database, ledger, vault, or simulators. The durable command is written before an external ledger call. If the process stops after the ledger commits but before the core stores the response, the deterministic ledger key permits replay without creating another entry. Recovery leases expire after 30 seconds if a worker crashes. Bank status retries use exponential delays capped at five minutes; the worker polls every second. The default policy checks status for 30 seconds and watches for late success for 10 minutes. Both windows and the deemed outcome can be configured per bank and amount tier in `core_bank_recovery_policies`. A deemed-success policy accepts the risk that the bank status remains unknown at the deadline. Simulator transaction state and idempotency caches are process-local, so simulator restarts can lose the status evidence. The circuit breaker is process-local and protects the single bank-simulator endpoint; alternate-bank failover is not implemented. Card-network unknown outcomes are also not yet included in the recovery worker. Outbox events remain stored but are not yet published to Redpanda.
 
 ## Verification
 
-The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. The full Python quality checks, unit suite, OpenAPI drift checks, ledger integrity verifier, card capture/void flows, and UPI happy path pass. No throughput, unknown-outcome recovery, chaos, or production payment claim is made.
+The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. The Phase 6 integration flow covers card response loss followed by hold recovery, UPI lost response followed by success, auto-reversal after status deadline, late success corrected to suspense, configured deemed success, and debit-success/credit-failure with a lost reversal response. Unit tests cover simulator declines/outages/idempotency and circuit-breaker behavior. This is not a claim of all failure-matrix cells, card late-success correction, alternate-bank failover, throughput, chaos safety, or production payment guarantees.

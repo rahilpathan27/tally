@@ -64,6 +64,8 @@ BEGIN
     );
     IF NOT gateway_verify_audit_chain() THEN RAISE EXCEPTION 'audit chain validation failed'; END IF;
 
+    -- Clear leftovers from prior runs inside this rollback-only fixture first.
+    PERFORM * FROM gateway_cleanup_expired_state(100000);
     INSERT INTO gateway_request_nonces(key_id, nonce, expires_at)
     VALUES ('integration-key-a', 'expired-nonce-00001', clock_timestamp() - interval '1 second');
     INSERT INTO gateway_idempotency_requests(

@@ -23,7 +23,7 @@ class TransferRequest(BaseModel):
 
 
 class TransferResponse(BaseModel):
-    status: Literal["approved", "declined"]
+    status: Literal["approved", "declined", "debit_succeeded_credit_failed"]
     bank_reference: str
 
 
@@ -31,6 +31,8 @@ class TransferResponse(BaseModel):
 class BankSimulatorConfig:
     modes: dict[str, str] = field(default_factory=dict)
     requests: dict[str, tuple[str, TransferResponse]] = field(default_factory=dict)
+    statuses: dict[str, str] = field(default_factory=dict)
+    transfer_banks: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def _config_from_environment() -> BankSimulatorConfig:
@@ -40,10 +42,24 @@ def _config_from_environment() -> BankSimulatorConfig:
     except json.JSONDecodeError as exc:
         raise RuntimeError("TALLY_BANK_SIM_MODES must be a JSON object") from exc
     if not isinstance(modes, dict) or any(
-        not isinstance(bank, str) or mode not in {"approve", "decline", "timeout", "http_500"}
+        not isinstance(bank, str)
+        or mode
+        not in {
+            "approve",
+            "decline",
+            "credit_failure",
+            "timeout",
+            "late_success",
+            "status_unknown",
+            "http_500",
+            "reverse_timeout",
+        }
         for bank, mode in modes.items()
     ):
-        raise RuntimeError("bank modes must map bank IDs to approve, decline, timeout, or http_500")
+        raise RuntimeError(
+            "bank modes must map bank IDs to approve, decline, credit_failure, timeout, "
+            "late_success, status_unknown, http_500, or reverse_timeout"
+        )
     return BankSimulatorConfig(modes=modes)
 
 
@@ -72,17 +88,48 @@ def create_app(config: BankSimulatorConfig | None = None) -> FastAPI:
             current.modes.get(body.remitter_bank, "approve"),
             current.modes.get(body.beneficiary_bank, "approve"),
         }
-        if "timeout" in modes:
-            await asyncio.sleep(0.1)
-            raise HTTPException(504, "simulated bank timeout")
+        current.transfer_banks[body.payment_id] = (body.remitter_bank, body.beneficiary_bank)
         if "http_500" in modes:
             raise HTTPException(503, "simulated bank outage")
         result = TransferResponse(
-            status="declined" if "decline" in modes else "approved",
+            status=(
+                "debit_succeeded_credit_failed"
+                if "credit_failure" in modes
+                else "declined"
+                if "decline" in modes
+                else "approved"
+            ),
             bank_reference=f"bank_{body.payment_id}",
         )
         current.requests[idempotency_key] = (fingerprint, result)
+        if not modes.intersection({"timeout", "status_unknown"}):
+            current.statuses[body.payment_id] = result.status
+        if modes.intersection({"timeout", "late_success", "status_unknown"}):
+            await asyncio.sleep(0.1)
+            raise HTTPException(504, "simulated response lost after bank decision")
         return result
+
+    @app.get("/v1/transfers/{payment_id}/status")
+    async def transfer_status(payment_id: str) -> dict[str, str]:
+        current: BankSimulatorConfig = app.state.config
+        banks = current.transfer_banks.get(payment_id, ())
+        if any(current.modes.get(bank) == "status_unknown" for bank in banks):
+            return {"payment_id": payment_id, "status": "unknown"}
+        return {"payment_id": payment_id, "status": current.statuses.get(payment_id, "not_found")}
+
+    @app.post("/v1/transfers/{payment_id}/reverse")
+    async def reverse_transfer(payment_id: str) -> dict[str, str]:
+        current: BankSimulatorConfig = app.state.config
+        prior_status = current.statuses.get(payment_id, "not_found")
+        if prior_status == "reversed":
+            return {"payment_id": payment_id, "status": "reversed"}
+        if prior_status != "debit_succeeded_credit_failed":
+            raise HTTPException(409, "transfer has no reversible debit leg")
+        current.statuses[payment_id] = "reversed"
+        banks = current.transfer_banks.get(payment_id, ())
+        if any(current.modes.get(bank) == "reverse_timeout" for bank in banks):
+            raise HTTPException(504, "simulated reversal response lost after bank reversal")
+        return {"payment_id": payment_id, "status": "reversed"}
 
     return app
 

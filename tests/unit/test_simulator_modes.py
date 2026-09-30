@@ -15,7 +15,12 @@ def test_simulator_failure_modes_and_message_idempotency() -> None:
     async def exercise() -> None:
         bank_app = create_bank_app(
             BankSimulatorConfig(
-                modes={"bank-a": "decline", "bank-b": "timeout", "bank-c": "http_500"}
+                modes={
+                    "bank-a": "decline",
+                    "bank-b": "timeout",
+                    "bank-c": "http_500",
+                    "bank-e": "late_success",
+                }
             )
         )
         bank = httpx.AsyncClient(
@@ -49,6 +54,14 @@ def test_simulator_failure_modes_and_message_idempotency() -> None:
             headers={"Idempotency-Key": "message-2"},
         )
         assert timeout.status_code == 504
+        late = await bank.post(
+            "/v1/transfers",
+            json={**transfer, "payment_id": "payment-late", "remitter_bank": "bank-e"},
+            headers={"Idempotency-Key": "message-late"},
+        )
+        assert late.status_code == 504
+        late_status = await bank.get("/v1/transfers/payment-late/status")
+        assert late_status.json()["status"] == "approved"
         unavailable = await bank.post(
             "/v1/transfers",
             json={**transfer, "payment_id": "payment-3", "beneficiary_bank": "bank-c"},
@@ -88,3 +101,21 @@ def test_simulator_failure_modes_and_message_idempotency() -> None:
         await network.aclose()
 
     asyncio.run(exercise())
+
+
+def test_bank_circuit_breaker_opens_and_resets() -> None:
+    from time import monotonic
+
+    from services.core.recovery import CircuitBreaker, recovery_delay_seconds
+
+    breaker = CircuitBreaker(failure_threshold=2, reset_after_seconds=5)
+    assert breaker.allow_request()
+    breaker.record_failure()
+    assert breaker.allow_request()
+    breaker.record_failure()
+    assert not breaker.allow_request()
+    breaker.opened_at = monotonic() - 6
+    assert breaker.allow_request()
+    assert recovery_delay_seconds(0) == 1
+    assert recovery_delay_seconds(3) == 8
+    assert recovery_delay_seconds(20) == 300

@@ -4,7 +4,7 @@ Tally is a local simulation of a ledger-backed payments platform. It does not mo
 
 ## Status
 
-Phases 1–5 from Section 17 of the master build prompt are implemented and locally verified: foundation, money/ledger, gateway controls, isolated test-card vault, and the first card/UPI payment flows. Unknown-outcome recovery, reconciliation, risk, web interfaces, chaos demos, cloud deployment, and later-phase features are not implemented yet. See [docs/PROGRESS.md](docs/PROGRESS.md) for verified status and gaps.
+Phases 1–5 and the simulator recovery slice of Phase 6 from Section 17 of the master build prompt are implemented and locally verified. Phase 6 includes card and UPI status checks, configured UPI deemed outcomes, bank reversal handling, UPI late-success correction to suspense, a leased recovery loop, and separate circuit breakers. Card late-success correction, alternate-bank routing, exhaustive failure-matrix coverage, reconciliation, risk, web interfaces, chaos demos, cloud deployment, and later-phase features remain open. See [docs/PROGRESS.md](docs/PROGRESS.md) for verified status and gaps.
 
 ## Local foundation
 
@@ -39,7 +39,7 @@ Run the internal ledger HTTP service in its own terminal with `make ledger-api`.
 
 All published ports bind to loopback. PostgreSQL host ports are 55432 (general), 55433 (ledger), and 55434 (vault). The SeaweedFS S3 endpoint is `http://127.0.0.1:8333` and is unauthenticated in this local simulation. Ledger integration checks run after schema migration.
 
-The payment API runs on `http://127.0.0.1:8000` via `make core-api`; set `TALLY_API_KEY_ENCRYPTION_KEY` to a base64-encoded 32-byte key and `TALLY_NETWORK_SIMULATOR_KEY` before starting it. Its generated contract is [contracts/openapi/merchant-v1.json](contracts/openapi/merchant-v1.json). The merchant routes use the Phase 3 HMAC authentication, scopes, rate limiting, and idempotency middleware. Run `make seed` to add the local UPI VPAs and ledger chart accounts.
+The payment API runs on `http://127.0.0.1:8000` via `make core-api`; set `TALLY_API_KEY_ENCRYPTION_KEY` to a base64-encoded 32-byte key, `TALLY_NETWORK_SIMULATOR_KEY`, and `TALLY_RECOVERY_KEY` before starting it. Its generated contract is [contracts/openapi/merchant-v1.json](contracts/openapi/merchant-v1.json). The merchant routes use the Phase 3 HMAC authentication, scopes, rate limiting, and idempotency middleware. Run `make seed` to add the local UPI VPAs and ledger chart accounts.
 
 Run simulators in separate terminals with `make bank-sim`, `make payer-psp-sim`, and `make card-network-sim`. The bank simulator reads `TALLY_BANK_SIM_MODES` as a JSON map, for example `{"bank-a":"decline"}`; supported modes are `approve`, `decline`, `timeout`, and `http_500`. The PSP reads `TALLY_PAYER_PSP_MODE`; the card network reads `TALLY_CARD_NETWORK_MODE`. For card payments, start the vault API and card network with their local credentials configured; only the network simulator calls the vault detokenization route. These simulator APIs bind to loopback.
 

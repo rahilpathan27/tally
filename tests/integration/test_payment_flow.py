@@ -16,7 +16,8 @@ from libs.security.key_encryption import ApiKeyCipher
 from libs.security.rate_limit import MerchantRateLimiter
 from redis.asyncio import Redis
 from services.api_gateway.auth import MerchantHmacAuth
-from services.core.api import PaymentIntentRepository, create_app
+from services.core.api import PaymentIntentRepository, create_app, process_recovery_batch
+from services.core.recovery import CircuitBreaker
 from services.simulators.bank.api import BankSimulatorConfig
 from services.simulators.bank.api import create_app as create_bank_app
 from services.simulators.network.api import CardNetworkConfig
@@ -84,6 +85,8 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
         core_app.state.gateway_idempotency = PostgresIdempotencyStore(general_pool)
         core_app.state.gateway_rate_limit_policy = lambda _: (300, 60)
         core_app.state.payment_repository = PaymentIntentRepository(general_pool)
+        core_app.state.bank_breaker = CircuitBreaker()
+        core_app.state.card_network_breaker = CircuitBreaker()
         core_app.state.ledger_provisioning_key = PROVISIONING_KEY
         core_app.state.network_simulator_key = SIMULATOR_KEY
         core_app.state.ledger_http = httpx.AsyncClient(
@@ -181,6 +184,50 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                 assert capture.status_code == 200, capture.text
                 assert capture.json()["status"] == "succeeded"
 
+                uncertain_card_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 515,
+                        "currency": "INR",
+                        "payment_method_type": "card",
+                        "payment_method_token": token,
+                    },
+                    "phase6-card-create",
+                )
+                assert uncertain_card_create.status_code == 201
+                uncertain_card_id = uncertain_card_create.json()["payment_id"]
+                network_app.state.config = CardNetworkConfig(
+                    "http://vault", VAULT_NETWORK_KEY, SIMULATOR_KEY, mode="late_success"
+                )
+                uncertain_card_confirm = await send(
+                    "POST",
+                    f"/v1/payment_intents/{uncertain_card_id}/confirm",
+                    {},
+                    "phase6-card-confirm",
+                )
+                assert uncertain_card_confirm.json()["status"] == "pending_unknown"
+                recovered_card = await process_recovery_batch(
+                    core_app.state.payment_repository,
+                    core_app.state.bank_http,
+                    core_app.state.ledger_http,
+                    core_app.state.bank_breaker,
+                    network_http=core_app.state.card_network_http,
+                    network_breaker=core_app.state.card_network_breaker,
+                )
+                assert recovered_card == 1
+                network_app.state.config = CardNetworkConfig(
+                    "http://vault", VAULT_NETWORK_KEY, SIMULATOR_KEY
+                )
+                recovered_card_capture = await send(
+                    "POST",
+                    f"/v1/payment_intents/{uncertain_card_id}/capture",
+                    {},
+                    "phase6-card-capture",
+                )
+                assert recovered_card_capture.status_code == 200, recovered_card_capture.text
+                assert recovered_card_capture.json()["status"] == "succeeded"
+
                 cancel_create = await send(
                     "POST",
                     "/v1/payment_intents",
@@ -248,6 +295,234 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                 assert replay.status_code == 200
                 assert replay.json() == upi_confirm.json()
 
+                unknown_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 445,
+                        "currency": "INR",
+                        "payment_method_type": "upi",
+                        "payer_vpa": "payer@bank-a",
+                        "payee_vpa": "merchant@bank-b",
+                    },
+                    "phase6-upi-unknown-create",
+                )
+                assert unknown_create.status_code == 201
+                unknown_id = unknown_create.json()["payment_id"]
+                bank_app.state.config.modes["bank-a"] = "late_success"
+                unknown_confirm = await send(
+                    "POST",
+                    f"/v1/payment_intents/{unknown_id}/confirm",
+                    {},
+                    "phase6-upi-unknown-confirm",
+                )
+                assert unknown_confirm.status_code == 200
+                assert unknown_confirm.json()["status"] == "pending_unknown"
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT status FROM payment_intents WHERE payment_id = $1", UUID(unknown_id)
+                    )
+                    == "pending_unknown"
+                )
+                bank_app.state.config.modes["bank-a"] = "approve"
+                concurrent_recovery = await asyncio.gather(
+                    process_recovery_batch(
+                        core_app.state.payment_repository,
+                        core_app.state.bank_http,
+                        core_app.state.ledger_http,
+                        core_app.state.bank_breaker,
+                    ),
+                    process_recovery_batch(
+                        core_app.state.payment_repository,
+                        core_app.state.bank_http,
+                        core_app.state.ledger_http,
+                        core_app.state.bank_breaker,
+                    ),
+                )
+                assert sum(concurrent_recovery) == 1
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT status FROM payment_intents WHERE payment_id = $1", UUID(unknown_id)
+                    )
+                    == "succeeded"
+                )
+
+                late_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 510,
+                        "currency": "INR",
+                        "payment_method_type": "upi",
+                        "payer_vpa": "payer@bank-a",
+                        "payee_vpa": "merchant@bank-b",
+                    },
+                    "phase6-late-create",
+                )
+                assert late_create.status_code == 201
+                late_id = late_create.json()["payment_id"]
+                bank_app.state.config.modes["bank-a"] = "timeout"
+                late_confirm = await send(
+                    "POST",
+                    f"/v1/payment_intents/{late_id}/confirm",
+                    {},
+                    "phase6-late-confirm",
+                )
+                assert late_confirm.json()["status"] == "pending_unknown"
+                await general_pool.execute(
+                    """UPDATE payment_intents SET recovery_deadline = clock_timestamp()
+                           - interval '1 second', next_recovery_at = clock_timestamp()
+                       WHERE payment_id = $1""",
+                    UUID(late_id),
+                )
+                deemed = await process_recovery_batch(
+                    core_app.state.payment_repository,
+                    core_app.state.bank_http,
+                    core_app.state.ledger_http,
+                    core_app.state.bank_breaker,
+                )
+                assert deemed == 1
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT status FROM payment_intents WHERE payment_id = $1", UUID(late_id)
+                    )
+                    == "reversed"
+                )
+                bank_app.state.config.statuses[late_id] = "approved"
+                await general_pool.execute(
+                    """UPDATE payment_intents SET next_recovery_at = clock_timestamp()
+                       WHERE payment_id = $1""",
+                    UUID(late_id),
+                )
+                corrected = await process_recovery_batch(
+                    core_app.state.payment_repository,
+                    core_app.state.bank_http,
+                    core_app.state.ledger_http,
+                    core_app.state.bank_breaker,
+                )
+                assert corrected == 1
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT count(*) FROM core_recovery_incidents WHERE payment_id = $1",
+                        UUID(late_id),
+                    )
+                    == 1
+                )
+                with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+                    await general_pool.execute(
+                        """UPDATE core_recovery_incidents SET bank_status = 'tampered'
+                           WHERE payment_id = $1""",
+                        UUID(late_id),
+                    )
+                assert (
+                    await ledger_pool.fetchval(
+                        "SELECT count(*) FROM ledger_journal_entries WHERE idempotency_key = $1",
+                        f"{late_id}:upi:transfer:post:late-success-correction",
+                    )
+                    == 1
+                )
+
+                await general_pool.execute(
+                    """INSERT INTO core_bank_recovery_policies(
+                           bank_id, min_amount_minor, max_amount_minor,
+                           status_check_deadline_seconds, late_success_window_seconds,
+                           deemed_outcome
+                       ) VALUES ('bank-a', 700, 800, 2, 60, 'deemed_success')
+                       ON CONFLICT (bank_id, min_amount_minor) DO UPDATE SET
+                           max_amount_minor = EXCLUDED.max_amount_minor,
+                           status_check_deadline_seconds = EXCLUDED.status_check_deadline_seconds,
+                           late_success_window_seconds = EXCLUDED.late_success_window_seconds,
+                           deemed_outcome = EXCLUDED.deemed_outcome"""
+                )
+                deemed_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 755,
+                        "currency": "INR",
+                        "payment_method_type": "upi",
+                        "payer_vpa": "payer@bank-a",
+                        "payee_vpa": "merchant@bank-b",
+                    },
+                    "phase6-deemed-create",
+                )
+                assert deemed_create.status_code == 201
+                deemed_id = deemed_create.json()["payment_id"]
+                bank_app.state.config.modes["bank-a"] = "status_unknown"
+                deemed_confirm = await send(
+                    "POST",
+                    f"/v1/payment_intents/{deemed_id}/confirm",
+                    {},
+                    "phase6-deemed-confirm",
+                )
+                assert deemed_confirm.json()["status"] == "pending_unknown"
+                await general_pool.execute(
+                    """UPDATE payment_intents SET recovery_deadline = clock_timestamp()
+                           - interval '1 second', next_recovery_at = clock_timestamp()
+                       WHERE payment_id = $1""",
+                    UUID(deemed_id),
+                )
+                deemed_processed = await process_recovery_batch(
+                    core_app.state.payment_repository,
+                    core_app.state.bank_http,
+                    core_app.state.ledger_http,
+                    core_app.state.bank_breaker,
+                )
+                assert deemed_processed == 1
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT status FROM payment_intents WHERE payment_id = $1",
+                        UUID(deemed_id),
+                    )
+                    == "succeeded"
+                )
+
+                partial_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 620,
+                        "currency": "INR",
+                        "payment_method_type": "upi",
+                        "payer_vpa": "payer@bank-a",
+                        "payee_vpa": "merchant@bank-b",
+                    },
+                    "phase6-partial-create",
+                )
+                assert partial_create.status_code == 201
+                partial_id = partial_create.json()["payment_id"]
+                bank_app.state.config.modes.update(
+                    {"bank-a": "credit_failure", "bank-b": "reverse_timeout"}
+                )
+                partial_confirm = await send(
+                    "POST",
+                    f"/v1/payment_intents/{partial_id}/confirm",
+                    {},
+                    "phase6-partial-confirm",
+                )
+                assert partial_confirm.json()["status"] == "pending_unknown"
+                recovered_reversal = await process_recovery_batch(
+                    core_app.state.payment_repository,
+                    core_app.state.bank_http,
+                    core_app.state.ledger_http,
+                    core_app.state.bank_breaker,
+                )
+                assert recovered_reversal == 1
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT status FROM payment_intents WHERE payment_id = $1",
+                        UUID(partial_id),
+                    )
+                    == "failed"
+                )
+                assert (
+                    await ledger_pool.fetchval(
+                        "SELECT count(*) FROM ledger_journal_entries WHERE idempotency_key = $1",
+                        f"{partial_id}:upi:transfer:post",
+                    )
+                    == 0
+                )
+
                 illegal_capture = await send(
                     "POST",
                     f"/v1/payment_intents/{upi_id}/capture",
@@ -269,9 +544,18 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                 assert (
                     await general_pool.fetchval(
                         "SELECT count(*) FROM core_outbox WHERE aggregate_id = ANY($1::uuid[])",
-                        [UUID(card_id), UUID(cancel_id), UUID(upi_id)],
+                        [
+                            UUID(card_id),
+                            UUID(uncertain_card_id),
+                            UUID(cancel_id),
+                            UUID(upi_id),
+                            UUID(unknown_id),
+                            UUID(late_id),
+                            UUID(deemed_id),
+                            UUID(partial_id),
+                        ],
                     )
-                    == 12
+                    == 36
                 )
                 assert (
                     await ledger_pool.fetchval(

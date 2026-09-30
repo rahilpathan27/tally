@@ -47,7 +47,12 @@ ALLOWED_TRANSITIONS: dict[PaymentState, frozenset[PaymentState]] = {
         {PaymentState.SUCCEEDED, PaymentState.FAILED, PaymentState.PENDING_UNKNOWN}
     ),
     PaymentState.PENDING_UNKNOWN: frozenset(
-        {PaymentState.SUCCEEDED, PaymentState.FAILED, PaymentState.REVERSAL_PENDING}
+        {
+            PaymentState.AUTHORIZED,
+            PaymentState.SUCCEEDED,
+            PaymentState.FAILED,
+            PaymentState.REVERSAL_PENDING,
+        }
     ),
     PaymentState.REVERSAL_PENDING: frozenset({PaymentState.REVERSED, PaymentState.SUCCEEDED}),
     PaymentState.SUCCEEDED: frozenset(),
