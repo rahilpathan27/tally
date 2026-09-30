@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Path, Request, status
+from fastapi import FastAPI, Header, HTTPException, Path, Request, status
 from libs.money import MAX_SAFE_INTEGER
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -67,6 +68,20 @@ class IntegrityCheck(BaseModel):
     check_name: str
     ok: bool
     detail: str
+
+
+class MerchantAccountProvisionRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    merchant_id: Annotated[
+        str, StringConstraints(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    ]
+    currency: Literal["INR"] = "INR"
+
+
+class MerchantAccountProvisionResponse(BaseModel):
+    account_id: str
+    currency: str
 
 
 def _posting_payload(request: PostEntryRequest | PlaceHoldRequest) -> str:
@@ -130,6 +145,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("LEDGER_DATABASE_URL must be configured")
     pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10, command_timeout=5)
     app.state.pool = pool
+    app.state.provisioning_key = os.environ.get("LEDGER_PROVISIONING_KEY", "")
     try:
         yield
     finally:
@@ -160,6 +176,53 @@ async def readiness(request: Request) -> dict[str, str]:
             status.HTTP_503_SERVICE_UNAVAILABLE, "ledger database is not ready"
         ) from exc
     return {"status": "ready"}
+
+
+@app.post(
+    "/internal/v1/merchant-accounts",
+    response_model=MerchantAccountProvisionResponse,
+    include_in_schema=False,
+)
+async def provision_merchant_account(
+    body: MerchantAccountProvisionRequest,
+    request: Request,
+    x_ledger_provisioning_key: Annotated[str | None, Header()] = None,
+) -> MerchantAccountProvisionResponse:
+    expected = cast(str, getattr(request.app.state, "provisioning_key", ""))
+    if (
+        not expected
+        or not x_ledger_provisioning_key
+        or not hmac.compare_digest(expected, x_ledger_provisioning_key)
+    ):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "ledger provisioning authentication failed"
+        )
+    account_id = f"merchant:{body.merchant_id}:payable:{body.currency}"
+    async with _pool(request).acquire() as connection, connection.transaction():
+        await connection.execute(
+            """INSERT INTO ledger_accounts(account_id, account_type, currency, allow_negative)
+               VALUES ($1, 'liability', $2, false) ON CONFLICT (account_id) DO NOTHING""",
+            account_id,
+            body.currency,
+        )
+        existing = await connection.fetchrow(
+            """SELECT account_type::text, currency FROM ledger_accounts
+               WHERE account_id = $1 FOR UPDATE""",
+            account_id,
+        )
+        if (
+            existing is None
+            or existing["account_type"] != "liability"
+            or existing["currency"].strip() != body.currency
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "merchant ledger account conflicts with chart"
+            )
+        await connection.execute(
+            "INSERT INTO ledger_account_balances(account_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            account_id,
+        )
+    return MerchantAccountProvisionResponse(account_id=account_id, currency=body.currency)
 
 
 @app.post("/v1/entries", response_model=PostingResponse, status_code=status.HTTP_201_CREATED)

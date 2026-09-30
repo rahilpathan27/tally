@@ -45,6 +45,7 @@ class GatewayRoute(APIRoute):
             limiter: MerchantRateLimiter = app_state.gateway_rate_limiter
             idempotency: PostgresIdempotencyStore = app_state.gateway_idempotency
             principal: MerchantPrincipal = await auth(request)
+            request.state.merchant_principal = principal
             if required_scope is not None:
                 require_scope(principal, str(required_scope))
 
