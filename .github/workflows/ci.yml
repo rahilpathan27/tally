@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy libs services tests
+      - run: uv run python -m libs.money.float_ban
+      - run: uv run python -m scripts.export_openapi --check
+      - run: uv run pytest
+      - run: uv run mutmut run
+      - run: uv run python scripts/check_mutation_score.py

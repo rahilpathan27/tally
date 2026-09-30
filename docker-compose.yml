@@ -1,0 +1,92 @@
+name: tally
+
+services:
+  postgres-general:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tally
+      POSTGRES_PASSWORD: tally-local-only
+      POSTGRES_DB: tally
+    ports: ["127.0.0.1:55432:5432"]
+    volumes: ["postgres-general-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tally -d tally"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres-ledger:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tally
+      POSTGRES_PASSWORD: tally-local-only
+      POSTGRES_DB: tally_ledger_v1
+    ports: ["127.0.0.1:55433:5432"]
+    volumes: ["postgres-ledger-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tally -d tally_ledger"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres-vault:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tally
+      POSTGRES_PASSWORD: tally-local-only
+      POSTGRES_DB: tally_vault
+    ports: ["127.0.0.1:55434:5432"]
+    volumes: ["postgres-vault-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tally -d tally_vault"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.18
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:19092
+    ports: ["127.0.0.1:19092:19092", "127.0.0.1:19644:9644"]
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--api-urls", "localhost:9644"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  object-store:
+    image: chrislusf/seaweedfs:3.93
+    command: ["server", "-dir=/data", "-s3"]
+    ports:
+      - "127.0.0.1:8333:8333"
+      - "127.0.0.1:9333:9333"
+      - "127.0.0.1:8888:8888"
+    volumes: ["object-store-data:/data"]
+
+volumes:
+  postgres-general-data:
+  postgres-ledger-data:
+  postgres-vault-data:
+  object-store-data:

@@ -1,0 +1,56 @@
+[project]
+name = "tally-platform"
+version = "0.1.0"
+description = "Local simulation scaffold for the Tally payments platform"
+requires-python = ">=3.12"
+dependencies = [
+  "asyncpg>=0.29",
+  "cryptography>=44.0",
+  "fastapi>=0.115",
+  "pydantic>=2.9",
+  "redis>=5.0",
+  "uvicorn>=0.30",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.11",
+  "pytest>=8.3",
+  "hypothesis>=6.112",
+  "mutmut>=3.7,<4",
+  "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["services", "libs", "tests"]
+extend-exclude = ["mutants"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "."
+packages = []
+
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]
+
+[tool.mutmut]
+source_paths = ["libs/money", "services/ledger"]
+only_mutate = ["libs/money/money.py", "services/ledger/model.py"]
+on_dependency_change = "rerun"
+pytest_add_cli_args_test_selection = [
+  "tests/unit/test_money.py",
+  "tests/unit/test_ledger_model.py",
+  "tests/property/test_allocation.py",
+]
