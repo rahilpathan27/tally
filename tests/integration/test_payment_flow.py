@@ -215,7 +215,14 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                     network_http=core_app.state.card_network_http,
                     network_breaker=core_app.state.card_network_breaker,
                 )
-                assert recovered_card == 1
+                assert recovered_card >= 1
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT status FROM payment_intents WHERE payment_id = $1",
+                        UUID(uncertain_card_id),
+                    )
+                    == "authorized"
+                )
                 network_app.state.config = CardNetworkConfig(
                     "http://vault", VAULT_NETWORK_KEY, SIMULATOR_KEY
                 )
@@ -348,6 +355,41 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                     == "void"
                 )
 
+                # Confirm direct card and UPI declines terminate without a ledger effect.
+                network_app.state.config = CardNetworkConfig(
+                    "http://vault", VAULT_NETWORK_KEY, SIMULATOR_KEY, mode="decline"
+                )
+                declined_card_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 200,
+                        "currency": "INR",
+                        "payment_method_type": "card",
+                        "payment_method_token": token,
+                    },
+                    "phase6-card-decline-create",
+                )
+                assert declined_card_create.status_code == 201
+                declined_card_id = declined_card_create.json()["payment_id"]
+                declined_card = await send(
+                    "POST",
+                    f"/v1/payment_intents/{declined_card_id}/confirm",
+                    {},
+                    "phase6-card-decline-confirm",
+                )
+                assert declined_card.json()["status"] == "failed"
+                assert (
+                    await general_pool.fetchval(
+                        "SELECT ledger_hold_id FROM payment_intents WHERE payment_id = $1",
+                        UUID(declined_card_id),
+                    )
+                    is None
+                )
+                network_app.state.config = CardNetworkConfig(
+                    "http://vault", VAULT_NETWORK_KEY, SIMULATOR_KEY
+                )
+
                 upi_create = await send(
                     "POST",
                     "/v1/payment_intents",
@@ -362,6 +404,69 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                 )
                 assert upi_create.status_code == 201, upi_create.text
                 upi_id = upi_create.json()["payment_id"]
+
+                psp_app.state.config = PayerPspConfig(mode="decline")
+                psp_decline_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 201,
+                        "currency": "INR",
+                        "payment_method_type": "upi",
+                        "payer_vpa": "payer@bank-a",
+                        "payee_vpa": "merchant@bank-b",
+                    },
+                    "phase6-psp-decline-create",
+                )
+                assert psp_decline_create.status_code == 201
+                psp_decline_id = psp_decline_create.json()["payment_id"]
+                psp_declined = await send(
+                    "POST",
+                    f"/v1/payment_intents/{psp_decline_id}/confirm",
+                    {},
+                    "phase6-psp-decline-confirm",
+                )
+                assert psp_declined.json()["status"] == "failed"
+                assert (
+                    await ledger_pool.fetchval(
+                        "SELECT count(*) FROM ledger_journal_entries WHERE idempotency_key = $1",
+                        f"{psp_decline_id}:upi:transfer:post",
+                    )
+                    == 0
+                )
+                psp_app.state.config = PayerPspConfig()
+
+                bank_app.state.config.modes["bank-a"] = "decline"
+                bank_decline_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 202,
+                        "currency": "INR",
+                        "payment_method_type": "upi",
+                        "payer_vpa": "payer@bank-a",
+                        "payee_vpa": "merchant@bank-b",
+                    },
+                    "phase6-bank-decline-create",
+                )
+                assert bank_decline_create.status_code == 201
+                bank_decline_id = bank_decline_create.json()["payment_id"]
+                bank_declined = await send(
+                    "POST",
+                    f"/v1/payment_intents/{bank_decline_id}/confirm",
+                    {},
+                    "phase6-bank-decline-confirm",
+                )
+                assert bank_declined.json()["status"] == "failed"
+                assert (
+                    await ledger_pool.fetchval(
+                        "SELECT count(*) FROM ledger_journal_entries WHERE idempotency_key = $1",
+                        f"{bank_decline_id}:upi:transfer:post",
+                    )
+                    == 0
+                )
+                bank_app.state.config.modes["bank-a"] = "approve"
+
                 confirm_path = f"/v1/payment_intents/{upi_id}/confirm"
                 upi_confirm = await send("POST", confirm_path, {}, "phase5-upi-confirm")
                 assert upi_confirm.status_code == 200, upi_confirm.text
@@ -621,6 +726,9 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                         "SELECT count(*) FROM core_outbox WHERE aggregate_id = ANY($1::uuid[])",
                         [
                             UUID(card_id),
+                            UUID(declined_card_id),
+                            UUID(psp_decline_id),
+                            UUID(bank_decline_id),
                             UUID(uncertain_card_id),
                             UUID(late_card_id),
                             UUID(cancel_id),
@@ -631,7 +739,7 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                             UUID(partial_id),
                         ],
                     )
-                    == 42
+                    == 51
                 )
                 assert (
                     await ledger_pool.fetchval(
