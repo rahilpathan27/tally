@@ -228,6 +228,81 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                 assert recovered_card_capture.status_code == 200, recovered_card_capture.text
                 assert recovered_card_capture.json()["status"] == "succeeded"
 
+                late_card_create = await send(
+                    "POST",
+                    "/v1/payment_intents",
+                    {
+                        "amount_minor": 525,
+                        "currency": "INR",
+                        "payment_method_type": "card",
+                        "payment_method_token": token,
+                    },
+                    "phase6-card-late-create",
+                )
+                assert late_card_create.status_code == 201
+                late_card_id = late_card_create.json()["payment_id"]
+                network_app.state.config = CardNetworkConfig(
+                    "http://vault", VAULT_NETWORK_KEY, SIMULATOR_KEY, mode="http_500"
+                )
+                late_card_confirm = await send(
+                    "POST",
+                    f"/v1/payment_intents/{late_card_id}/confirm",
+                    {},
+                    "phase6-card-late-confirm",
+                )
+                assert late_card_confirm.json()["status"] == "pending_unknown"
+                await general_pool.execute(
+                    """UPDATE payment_intents SET recovery_deadline = clock_timestamp()
+                           - interval '1 second', next_recovery_at = clock_timestamp()
+                       WHERE payment_id = $1""",
+                    UUID(late_card_id),
+                )
+                deemed_card = await process_recovery_batch(
+                    core_app.state.payment_repository,
+                    core_app.state.bank_http,
+                    core_app.state.ledger_http,
+                    core_app.state.bank_breaker,
+                    network_http=core_app.state.card_network_http,
+                    network_breaker=core_app.state.card_network_breaker,
+                )
+                assert deemed_card == 1
+                network_app.state.statuses[late_card_id] = "approved"
+                await general_pool.execute(
+                    """UPDATE payment_intents SET next_recovery_at = clock_timestamp()
+                       WHERE payment_id = $1""",
+                    UUID(late_card_id),
+                )
+                voided_card = await process_recovery_batch(
+                    core_app.state.payment_repository,
+                    core_app.state.bank_http,
+                    core_app.state.ledger_http,
+                    core_app.state.bank_breaker,
+                    network_http=core_app.state.card_network_http,
+                    network_breaker=core_app.state.card_network_breaker,
+                )
+                assert voided_card == 1
+                late_card_hold = await general_pool.fetchval(
+                    "SELECT ledger_hold_id FROM payment_intents WHERE payment_id = $1",
+                    UUID(late_card_id),
+                )
+                assert (
+                    await ledger_pool.fetchval(
+                        "SELECT status::text FROM ledger_holds WHERE hold_id = $1", late_card_hold
+                    )
+                    == "void"
+                )
+                assert (
+                    await general_pool.fetchval(
+                        """SELECT correction_reference FROM core_recovery_incidents
+                           WHERE payment_id = $1""",
+                        UUID(late_card_id),
+                    )
+                    == f"ledger_hold:{late_card_hold}:void"
+                )
+                network_app.state.config = CardNetworkConfig(
+                    "http://vault", VAULT_NETWORK_KEY, SIMULATOR_KEY
+                )
+
                 cancel_create = await send(
                     "POST",
                     "/v1/payment_intents",
@@ -547,6 +622,7 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                         [
                             UUID(card_id),
                             UUID(uncertain_card_id),
+                            UUID(late_card_id),
                             UUID(cancel_id),
                             UUID(upi_id),
                             UUID(unknown_id),
@@ -555,7 +631,7 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                             UUID(partial_id),
                         ],
                     )
-                    == 36
+                    == 42
                 )
                 assert (
                     await ledger_pool.fetchval(

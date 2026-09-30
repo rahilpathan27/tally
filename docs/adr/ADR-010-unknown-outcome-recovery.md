@@ -24,4 +24,4 @@ If status later reports success after a payment was deemed reversed, the core re
 - Recovery commands and deadlines survive core restarts; ledger retries use deterministic keys.
 - A late success is visible for reconciliation without silently re-crediting the merchant.
 - Simulator status records and the circuit breaker are process-local. Restarting the simulator loses evidence, and the breaker resets on core restart.
-- The same durable status-check and lease approach resumes card-network approvals and places the corresponding ledger hold. Card late-success correction after a deemed reversal, alternate-bank failover, real bank protocols, and exhaustive failure-matrix coverage remain future work.
+- The same durable status-check and lease approach resumes card-network approvals and places the corresponding ledger hold. If card approval arrives after a deemed reversal, the worker voids the hold and records an incident. Alternate-bank failover, real bank protocols, and exhaustive failure-matrix coverage remain future work.

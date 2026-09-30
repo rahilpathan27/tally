@@ -37,6 +37,7 @@ The verified card flow is `created → authorizing → authorized → capturing 
 | Card network approves | `authorized`; merchant may capture or cancel | Place hold, then post on capture or void on cancel |
 | Card network declines | `failed` | No hold |
 | Card authorization response is lost | Worker checks network status; on approval it places the stored deterministic hold and returns to `authorized` | A retry reuses the same hold idempotency key |
+| Card authorization is reported after the payment was deemed reversed | Worker creates the hold, immediately voids it, and records a recovery incident | The hold lifecycle is recorded as void; no capture journal is posted |
 | UPI payer PSP declines | `failed` | No posting |
 | Either UPI bank declines | `failed` | No posting |
 | Both UPI banks approve | `succeeded` | One idempotent transfer posting |
@@ -51,4 +52,4 @@ There is no distributed transaction across the general database, ledger, vault, 
 
 ## Verification
 
-The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. The Phase 6 integration flow covers card response loss followed by hold recovery, UPI lost response followed by success, auto-reversal after status deadline, late success corrected to suspense, configured deemed success, and debit-success/credit-failure with a lost reversal response. Unit tests cover simulator declines/outages/idempotency and circuit-breaker behavior. This is not a claim of all failure-matrix cells, card late-success correction, alternate-bank failover, throughput, chaos safety, or production payment guarantees.
+The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. The Phase 6 integration flow covers card response loss followed by hold recovery, late card authorization voiding, UPI lost response followed by success, auto-reversal after status deadline, late success corrected to suspense, configured deemed success, and debit-success/credit-failure with a lost reversal response. Unit tests cover simulator declines/outages/idempotency and circuit-breaker behavior. This is not a claim of all failure-matrix cells, alternate-bank failover, throughput, chaos safety, or production payment guarantees.

@@ -4,7 +4,7 @@ Tally is a local simulation of a ledger-backed payments platform. It does not mo
 
 ## Status
 
-Phases 1–5 and the simulator recovery slice of Phase 6 from Section 17 of the master build prompt are implemented and locally verified. Phase 6 includes card and UPI status checks, configured UPI deemed outcomes, bank reversal handling, UPI late-success correction to suspense, a leased recovery loop, and separate circuit breakers. Card late-success correction, alternate-bank routing, exhaustive failure-matrix coverage, reconciliation, risk, web interfaces, chaos demos, cloud deployment, and later-phase features remain open. See [docs/PROGRESS.md](docs/PROGRESS.md) for verified status and gaps.
+Phases 1–5 and the simulator recovery slice of Phase 6 from Section 17 of the master build prompt are implemented and locally verified. Phase 6 includes card and UPI status checks, configured UPI deemed outcomes, bank reversal handling, late card authorization voiding, UPI late-success correction to suspense, a leased recovery loop, and separate circuit breakers. Alternate-bank routing, exhaustive failure-matrix coverage, reconciliation, risk, web interfaces, chaos demos, cloud deployment, and later-phase features remain open. See [docs/PROGRESS.md](docs/PROGRESS.md) for verified status and gaps.
 
 ## Local foundation
 

@@ -333,7 +333,10 @@ class PaymentIntentRepository:
                              OR (p.status = 'reversed' AND c.state = 'pending'
                                  AND p.late_success_until IS NOT NULL)))
                        OR (p.payment_method_type = 'card' AND c.operation = 'place_hold'
-                           AND p.status = 'pending_unknown' AND c.state = 'pending'))
+                           AND ((p.status IN ('pending_unknown', 'reversal_pending')
+                                 AND c.state = 'pending')
+                             OR (p.status = 'reversed' AND c.state = 'pending'
+                                 AND p.late_success_until IS NOT NULL))))
                      AND (p.next_recovery_at IS NULL OR p.next_recovery_at <= clock_timestamp())
                      AND (p.recovery_lease_until IS NULL
                        OR p.recovery_lease_until <= clock_timestamp())
@@ -374,21 +377,25 @@ class PaymentIntentRepository:
         payment_id: UUID,
         merchant_id: str,
         bank_status: str,
-        correction_entry_id: str,
+        correction_entry_id: str | None,
+        correction_reference: str,
         original_command_key: str,
         correction_result: dict[str, object],
+        ledger_hold_id: int | None = None,
     ) -> None:
         async with self.pool.acquire() as connection, connection.transaction():
             incident_id = await connection.fetchval(
                 """INSERT INTO core_recovery_incidents(
-                       payment_id, merchant_id, incident_type, bank_status, correction_entry_id
-                   ) VALUES ($1, $2, 'late_success_after_reversal', $3, $4)
+                       payment_id, merchant_id, incident_type, bank_status,
+                       correction_entry_id, correction_reference
+                   ) VALUES ($1, $2, 'late_success_after_reversal', $3, $4, $5)
                    ON CONFLICT (payment_id, incident_type) DO NOTHING
                    RETURNING incident_id""",
                 payment_id,
                 merchant_id,
                 bank_status,
-                int(correction_entry_id),
+                int(correction_entry_id) if correction_entry_id is not None else None,
+                correction_reference,
             )
             if incident_id is not None:
                 await connection.execute(
@@ -402,6 +409,7 @@ class PaymentIntentRepository:
                             "merchant_id": merchant_id,
                             "bank_status": bank_status,
                             "correction_entry_id": correction_entry_id,
+                            "correction_reference": correction_reference,
                         },
                         separators=(",", ":"),
                     ),
@@ -414,8 +422,11 @@ class PaymentIntentRepository:
             )
             await connection.execute(
                 """UPDATE payment_intents SET late_success_until = NULL,
-                       recovery_lease_until = NULL WHERE payment_id = $1""",
+                       recovery_lease_until = NULL,
+                       ledger_hold_id = COALESCE($2, ledger_hold_id)
+                   WHERE payment_id = $1""",
                 payment_id,
+                ledger_hold_id,
             )
 
 
@@ -554,6 +565,29 @@ async def process_recovery_batch(
                 except (httpx.HTTPError, HTTPException):
                     await repository.reschedule_recovery(payment_id, row["recovery_attempts"] + 1)
                     continue
+                if row["status"] == PaymentState.REVERSED.value:
+                    hold_id = int(cast(str, ledger_result["hold_id"]))
+                    try:
+                        void_result = _validate_ledger_response(
+                            await ledger_http.post(f"/v1/holds/{hold_id}/void")
+                        )
+                    except (httpx.HTTPError, HTTPException):
+                        await repository.reschedule_recovery(
+                            payment_id, row["recovery_attempts"] + 1
+                        )
+                        continue
+                    await repository.record_late_success(
+                        payment_id,
+                        row["merchant_id"],
+                        str(bank_status),
+                        None,
+                        f"ledger_hold:{hold_id}:void",
+                        row["idempotency_key"],
+                        {"status": "late_card_authorization_voided", **void_result},
+                        ledger_hold_id=hold_id,
+                    )
+                    processed += 1
+                    continue
                 accepted, _, _ = await repository.transition(
                     payment_id,
                     row["merchant_id"],
@@ -590,6 +624,7 @@ async def process_recovery_batch(
                     row["merchant_id"],
                     str(bank_status),
                     str(ledger_result["entry_id"]),
+                    f"ledger_entry:{ledger_result['entry_id']}",
                     row["idempotency_key"],
                     {"status": "late_success_corrected_to_suspense", **ledger_result},
                 )

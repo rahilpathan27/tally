@@ -78,7 +78,10 @@ core-migrate:
 	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0003_late_success_incidents.sql; fi; \
 	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM core_schema_migrations WHERE version = 4" 2>/dev/null || true); \
 	if [ "$$version" = "4" ]; then echo "Core schema version 4 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0004_bank_recovery_policies.sql; fi
+	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0004_bank_recovery_policies.sql; fi; \
+	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM core_schema_migrations WHERE version = 5" 2>/dev/null || true); \
+	if [ "$$version" = "5" ]; then echo "Core schema version 5 is already applied"; \
+	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0005_card_late_success_incidents.sql; fi
 
 core-test-integration: core-migrate gateway-migrate vault-migrate seed
 	REDIS_URL=redis://127.0.0.1:6379/0 TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally VAULT_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55434/tally_vault LEDGER_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55433/tally_ledger_v1 uv run pytest tests/integration/test_payment_flow.py
