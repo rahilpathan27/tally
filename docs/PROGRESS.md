@@ -23,7 +23,7 @@
 - HMAC primitive tests cover valid requests, method/path/body tampering, unknown keys, stale timestamps, and minimum secret length. The dependency integration test covers encrypted key lookup, valid request authentication, scope enforcement, tamper rejection, and duplicate nonce rejection. Latest lint, type, float-ban, full test, and OpenAPI checks pass.
 - `make gateway-migrate` applies gateway schema versions 1 through 4; it is repeatable.
 - `make gateway-test-integration` passes PostgreSQL checks for nonce replay rejection, idempotency replay/conflict, 20 concurrent duplicate reservations with exactly one starter, merchant-context isolation, RLS visibility against a populated second tenant, direct key-table/write denial, audit-chain immutability/verification, and expired-state cleanup. Its Redis integration check also verifies atomic fixed-window limits against the local Redis service.
-- Ledger API smoke checks previously verified journal replay, balance, and integrity endpoints against local PostgreSQL. A hold-post follow-up lookup was removed so the response key is derived deterministically without a second database query; a fresh HTTP smoke check of that change is pending because this sandbox blocks loopback connections.
+- Ledger API smoke checks against the Documents project root verified readiness, repeated hold-post replay (same entry ID and idempotency key), and all three integrity checks.
 
 ## Known gaps
 
@@ -38,5 +38,4 @@
 ## Deviations
 
 - The initial MinIO image pull returned access denied. ADR-003 records SeaweedFS 3.93 as the local S3-compatible replacement.
-- The hold-post response adjustment is linted and covered by the available suite, but its updated HTTP behavior has not been smoke-tested in this sandbox.
 - This is a synthetic simulation. It does not move real money, accept real card data, or claim PCI DSS/RBI certification or production readiness.
