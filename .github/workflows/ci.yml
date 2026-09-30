@@ -25,3 +25,22 @@ jobs:
       - run: uv run pytest
       - run: uv run mutmut run
       - run: uv run python scripts/check_mutation_score.py
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/console/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx eslint src e2e
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high

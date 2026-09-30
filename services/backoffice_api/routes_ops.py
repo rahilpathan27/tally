@@ -195,7 +195,11 @@ async def switch_stream(
             await asyncio.sleep(interval)
 
     return StreamingResponse(
-        events(), media_type="text/event-stream", headers={"x-accel-buffering": "no"}
+        events(),
+        media_type="text/event-stream",
+        # no-transform stops proxies (including the console's dev rewrite) compressing and
+        # therefore buffering the stream.
+        headers={"x-accel-buffering": "no", "cache-control": "no-cache, no-transform"},
     )
 
 

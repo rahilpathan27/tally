@@ -307,3 +307,15 @@ async def current_principal(request: Request) -> Principal:
         roles=frozenset(claims.get("roles", [])),
         merchant_id=claims.get("merchant_id"),
     )
+
+
+@router.get("/auth/session")
+async def session(request: Request) -> dict[str, Any]:
+    """Who is signed in (drives navigation; every route still enforces its own permission)."""
+    principal = await current_principal(request)
+    return {
+        "user_id": principal.user_id,
+        "email": principal.email,
+        "roles": sorted(principal.roles),
+        "merchant_id": principal.merchant_id,
+    }

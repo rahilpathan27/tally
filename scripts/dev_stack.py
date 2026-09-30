@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ from services.recon.api import create_app as create_recon_app
 from services.recon.engine import BankRecord, Kind, ReconConfig
 from services.recon.formats import write_statement
 from services.recon.service import ReconContext, bank_records_from_journal, ingest_file, run_recon
+from services.risk.rules import DEFAULT_RULES
 
 PASSWORD = "correct horse battery staple"
 USERS = {
@@ -77,7 +79,49 @@ async def _pay(stack: LocalStack, body: dict[str, Any], tag: str) -> dict[str, A
     return {"payment_id": payment_id, **result}
 
 
+def demo_rules() -> dict[str, Any]:
+    """Deterministic demo behaviour layered on the default rules (documented in the README)."""
+    rules = copy.deepcopy(DEFAULT_RULES)
+    rules["lists"]["allowlist"] = {"instrument_id": ["asha@bank-a"]}
+    rules["rules"][0:0] = [
+        {
+            "rule_id": "D001",
+            "description": "Large UPI transfer needs an analyst",
+            "reason_code": "LARGE_UPI_TRANSFER",
+            "action": "review",
+            "condition": {
+                "all": [
+                    {"fact": "is_card", "op": "==", "value": 0},
+                    {"fact": "amount_minor", "op": ">=", "value": 4_000_000},
+                ]
+            },
+        },
+        {
+            "rule_id": "D002",
+            "description": "Card payment of ₹5,000 or more needs a one-time code",
+            "reason_code": "CARD_STEP_UP",
+            "action": "step_up",
+            "condition": {
+                "all": [
+                    {"fact": "is_card", "op": "==", "value": 1},
+                    {"fact": "amount_minor", "op": ">=", "value": 500_000},
+                ]
+            },
+        },
+    ]
+    return rules
+
+
 async def seed(stack: LocalStack, bo: Backoffice, recon: ReconContext) -> dict[str, Any]:
+    await stack.general_pool.execute("UPDATE risk_rule_versions SET active = false WHERE active")
+    await stack.general_pool.execute(
+        """INSERT INTO risk_rule_versions(version, definition, created_by, approved_by, active,
+                                          activated_at)
+           VALUES (2, $1::jsonb, 'demo-seed', 'demo-seed-approver', true, clock_timestamp())""",
+        json.dumps({**demo_rules(), "version": 2}),
+    )
+    engine = stack.risk_app.state.risk_engine  # type: ignore[attr-defined]
+    await engine.refresh(force=True)
     for email, (roles, is_merchant) in USERS.items():
         await bo.user(email, roles, MERCHANT_ID if is_merchant else None, password=PASSWORD)
     pool = stack.general_pool
@@ -181,7 +225,8 @@ async def seed(stack: LocalStack, bo: Backoffice, recon: ReconContext) -> dict[s
     end = cutoff_instant(today)
     journal = list(stack.bank_app.state.config.journal)  # type: ignore[attr-defined]
     lines = bank_records_from_journal(journal, end - timedelta(days=1), end)
-    upi = [line for line in lines if line.kind == Kind.UPI_TRANSFER]
+    fresh = set(succeeded[len(succeeded) // 2 :])
+    upi = [line for line in lines if line.kind == Kind.UPI_TRANSFER and line.reference in fresh]
     mutated: list[BankRecord] = []
     for line in lines:
         if upi and line is upi[0]:

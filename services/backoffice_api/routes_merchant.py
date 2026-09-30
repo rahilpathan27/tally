@@ -9,6 +9,7 @@ import json
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
@@ -37,6 +38,10 @@ MERCHANT_SCOPES = (
 
 
 def _json(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        # PostgreSQL sum()/avg() return numeric. Money is always integral and must stay an
+        # integer on the wire; non-integral values are metrics such as latencies.
+        return int(value) if value == value.to_integral_value() else float(value)
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):
@@ -592,7 +597,7 @@ async def analytics(
             """SELECT (created_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
                       count(*) AS attempts,
                       count(*) FILTER (WHERE status = 'succeeded') AS succeeded,
-                      coalesce(sum(amount_minor) FILTER (WHERE status = 'succeeded'), 0)
+                      coalesce(sum(amount_minor) FILTER (WHERE status = 'succeeded'), 0)::bigint
                           AS volume_minor
                FROM payment_intents WHERE created_at > clock_timestamp() - make_interval(days => $1)
                GROUP BY 1 ORDER BY 1""",
@@ -625,7 +630,7 @@ async def analytics(
             days,
         )
         refunds = await connection.fetchrow(
-            """SELECT count(*) AS refunds, coalesce(sum(amount_minor), 0) AS refunded_minor
+            """SELECT count(*) AS refunds, coalesce(sum(amount_minor), 0)::bigint AS refunded_minor
                FROM refunds WHERE created_at > clock_timestamp() - make_interval(days => $1)""",
             days,
         )
@@ -634,6 +639,6 @@ async def analytics(
         "daily": [_row(r) | {"day": r["day"].isoformat()} for r in daily],
         "by_method": [_row(r) for r in by_method],
         "by_bank": [_row(r) for r in by_bank],
-        "confirm_latency_ms": {"p50": latency["p50"], "p95": latency["p95"]},
+        "confirm_latency_ms": {"p50": _json(latency["p50"]), "p95": _json(latency["p95"])},
         "refunds": _row(refunds),
     }

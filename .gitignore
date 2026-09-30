@@ -24,3 +24,6 @@ terraform.tfstate*
 ml/artifacts/*
 !ml/artifacts/fraud-gbm-v1/
 .data/
+web/console/test-results/
+web/console/playwright-report/
+web/console/next-env.d.ts

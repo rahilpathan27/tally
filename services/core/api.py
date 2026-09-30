@@ -687,6 +687,12 @@ def create_app() -> FastAPI:
                 challenge_id=UUID(risk.challenge_id) if risk.challenge_id else None,
                 reason_codes=risk.reason_codes,
             )
+        if risk.source != "disabled":
+            await state.pool.execute(
+                "UPDATE payment_intents SET risk_outcome = $2::jsonb WHERE payment_id = $1",
+                payment_id,
+                json.dumps(risk.as_json()),
+            )
         return await authorize_payment(
             state,
             payment_id,

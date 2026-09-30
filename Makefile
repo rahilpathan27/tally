@@ -1,4 +1,4 @@
-.PHONY: backoffice-api train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: dev web web-check e2e backoffice-api train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
 CHAOS_FLOW_SCENARIOS ?= 2000
@@ -105,6 +105,18 @@ retrain:
 
 risk-api:
 	TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally REDIS_URL=redis://127.0.0.1:6379/0 TALLY_INTERNAL_KEY=tally-local-internal TALLY_RECOVERY_KEY=tally-local-recovery uv run uvicorn services.risk.api:app --host 127.0.0.1 --port 8030
+
+dev:
+	uv run python -m scripts.dev_stack
+
+web:
+	cd web/console && npm run dev
+
+web-check:
+	cd web/console && npm run typecheck && npx eslint src e2e && npm test && npm run build
+
+e2e:
+	cd web/console && CI=1 npx playwright test
 
 simulate loadtest demo deploy-dev destroy-dev:
 	@echo "$@ is not available yet. See docs/PROGRESS.md for implementation status."
