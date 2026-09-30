@@ -109,7 +109,29 @@ class GatewayRoute(APIRoute):
                         headers={"Retry-After": "1"},
                     )
 
-            response = await original_handler(request)
+            try:
+                response = await original_handler(request)
+            except HTTPException as exc:
+                if not is_mutation:
+                    raise
+                assert idempotency_key is not None and fingerprint is not None
+                if exc.status_code >= 500:
+                    await idempotency.release(principal.merchant_id, idempotency_key, fingerprint)
+                else:
+                    # Client errors are deterministic for this payload; replay them verbatim.
+                    await idempotency.complete(
+                        principal.merchant_id,
+                        idempotency_key,
+                        fingerprint,
+                        exc.status_code,
+                        {"detail": exc.detail},
+                    )
+                raise
+            except Exception:
+                if is_mutation:
+                    assert idempotency_key is not None and fingerprint is not None
+                    await idempotency.release(principal.merchant_id, idempotency_key, fingerprint)
+                raise
             if is_mutation:
                 assert idempotency_key is not None and fingerprint is not None
                 response_bytes = getattr(response, "body", None)

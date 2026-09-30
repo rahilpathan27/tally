@@ -15,6 +15,8 @@
 - Phase 5 simulators: separate loopback APIs provide configurable card-network, payer PSP, and multi-bank outcomes. Bank messages and PSP approvals replay by idempotency key within the running simulator process. The message shapes are simplified, local examples, not NPCI protocol messages.
 - Phase 6 simulator outcome recovery: a leased worker checks card-network and bank status with exponential backoff and separate process-local circuit breakers. Per-bank, amount-tier PostgreSQL policies snapshot a 30-second default UPI decision deadline, 10-minute late-success watch and either `auto_reverse` or `deemed_success`. It handles lost card approvals, late card approval after a deemed reversal by creating and voiding the hold, lost UPI approval responses, debit-success/credit-failure reversal, and UPI late success after a deemed reversal by posting a deterministic correcting entry to suspense with an immutable incident and outbox event.
 - Phase 7 failure-injection harness: a fixed-seed chaos simulator injects pre-commit drops, lost acknowledgements, duplicate deliveries, and repeated hold capture/void requests. An independent checker validates the journal hash chain, per-currency balance, hold references, and non-negative posted/available balances after every scenario.
+- Phase 1–7 review fixes: stalled-payment sweeper for crash windows (`authorizing`, `capturing`, `cancelled` with pending void), ledger-first recovery (`GET /v1/entries/by-key`, `/v1/holds/by-key`), idempotency release on 5xx plus a 60-second reservation lease, named crash points (`services/core/faults.py`), an in-process service stack (`chaos/stack.py`) and the full-flow chaos harness (`chaos/flow_sim.py`). A generic migration runner (`scripts/migrate.py`) replaces the per-version Makefile blocks.
+- Ledger additions: platform chart migration (refund clearing, eight fee-income shards, GST payable), per-merchant payable/reserve/payout-in-transit/receivable provisioning, trial balance, statements, entry drill-down, balance as-of, snapshots with recomputation, and an integrity report endpoint.
 - Added ADRs 001–009 covering money, ledger locking and reservations, local object storage, tokenization, and payment orchestration, alongside ledger design and guarantees documentation.
 
 ## Verified
@@ -37,6 +39,8 @@
 - `make openapi` exports both the ledger and merchant payment API contracts; both drift checks pass.
 - `make chaos` passes 100,000 seeded scenarios (seed `7310026`): 16,544 pre-commit drops, 16,598 lost acknowledgements with replay, 16,646 duplicate deliveries, 33,473 hold void scenarios, and 16,739 hold capture scenarios. The checker ran after every scenario; see [docs/chaos-report.md](chaos-report.md).
 
+- Review-fix verification: `tests/integration/test_crash_recovery.py` crashes the orchestrator at every payment step boundary (visible and hidden external status) and passes; gateway tests cover 5xx release, 4xx replay and stale-lease takeover; full-flow chaos passed 5,000 scenarios on each of two seeds (see [chaos report](chaos-report.md)).
+
 ## Known gaps
 
 - The local FastAPI ledger API connects using the Compose superuser, binds to loopback, and has no network authentication; the app role remains a database role template rather than the API's runtime identity.
@@ -44,9 +48,9 @@
 - The outbox is transactionally persisted but has no Redpanda publisher/dispatcher. Simulator idempotency result caches are process-local and are lost on restart. Core and ledger local apps use the Compose database superuser; merchant VPA ownership, payment limits/velocity checks, and live rails are not implemented.
 - Gateway keys use local AES-GCM with a separately managed 32-byte key, not production KMS. Expired rows can be cleaned with `make gateway-cleanup`, but no scheduled cleanup worker exists. The internal ledger API remains separate and loopback-only.
 - Vault encryption currently uses a locally supplied AES-GCM KEK, and simulator identity uses a local shared credential rather than mTLS. No production KMS, certificate identity, key lifecycle, external audit anchoring, or real card-data support is implemented.
-- Snapshot tables exist and the Python model can snapshot/as-of, but there is no scheduled PostgreSQL snapshot writer, DB as-of query, or independent verifier worker.
+- PostgreSQL snapshots, as-of balances and the integrity report exist, but no scheduler invokes the daily report yet.
 - No ledger throughput/latency benchmark has been measured. The global chain-head lock serializes database writes.
-- Later phases remain unimplemented: refunds/settlements/webhooks, reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports. Phase 7 currently injects deterministic in-memory ledger faults; service-process termination and real network chaos remain future coverage.
+- Later phases remain unimplemented: refunds/settlements/webhooks, reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports. Full-flow chaos has 10,000 scenarios across two seeds, short of the 100,000 target; it simulates process kills in-process rather than terminating OS processes.
 - SeaweedFS is an S3-compatible local substitution for the inaccessible pinned MinIO image. Its S3 endpoint is unauthenticated and loopback-only; it does not provide production Object Lock guarantees.
 - GitHub Actions has not run on a hosted runner. Only the same local lint/type/test commands were run.
 

@@ -44,6 +44,56 @@
         "title": "AccountBalanceResponse",
         "type": "object"
       },
+      "AccountSummary": {
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "account_type": {
+            "title": "Account Type",
+            "type": "string"
+          },
+          "allow_negative": {
+            "title": "Allow Negative",
+            "type": "boolean"
+          },
+          "closed": {
+            "title": "Closed",
+            "type": "boolean"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "posted_minor": {
+            "title": "Posted Minor",
+            "type": "integer"
+          },
+          "shard_parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shard Parent Id"
+          }
+        },
+        "required": [
+          "account_id",
+          "account_type",
+          "currency",
+          "allow_negative",
+          "closed",
+          "shard_parent_id",
+          "posted_minor"
+        ],
+        "title": "AccountSummary",
+        "type": "object"
+      },
       "Direction": {
         "enum": [
           "debit",
@@ -51,6 +101,73 @@
         ],
         "title": "Direction",
         "type": "string"
+      },
+      "EntryDetail": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "entry_hash": {
+            "title": "Entry Hash",
+            "type": "string"
+          },
+          "entry_id": {
+            "title": "Entry Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "postings": {
+            "items": {
+              "$ref": "#/components/schemas/PostingInput"
+            },
+            "title": "Postings",
+            "type": "array"
+          },
+          "previous_hash": {
+            "title": "Previous Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "idempotency_key",
+          "entry_hash",
+          "previous_hash",
+          "created_at",
+          "postings"
+        ],
+        "title": "EntryDetail",
+        "type": "object"
+      },
+      "EntryLookupResponse": {
+        "properties": {
+          "entry_id": {
+            "title": "Entry Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "postings": {
+            "items": {
+              "$ref": "#/components/schemas/PostingInput"
+            },
+            "title": "Postings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "entry_id",
+          "idempotency_key",
+          "postings"
+        ],
+        "title": "EntryLookupResponse",
+        "type": "object"
       },
       "HTTPValidationError": {
         "properties": {
@@ -63,6 +180,41 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HoldLookupResponse": {
+        "properties": {
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Id"
+          },
+          "hold_id": {
+            "title": "Hold Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hold_id",
+          "idempotency_key",
+          "status",
+          "entry_id"
+        ],
+        "title": "HoldLookupResponse",
         "type": "object"
       },
       "HoldResponse": {
@@ -109,6 +261,54 @@
           "detail"
         ],
         "title": "IntegrityCheck",
+        "type": "object"
+      },
+      "IntegrityReport": {
+        "properties": {
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/IntegrityCheck"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "snapshot_mismatches": {
+            "title": "Snapshot Mismatches",
+            "type": "integer"
+          },
+          "trial_balance_balanced": {
+            "title": "Trial Balance Balanced",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "generated_at",
+          "checks",
+          "trial_balance_balanced",
+          "snapshot_id",
+          "snapshot_mismatches",
+          "ok"
+        ],
+        "title": "IntegrityReport",
         "type": "object"
       },
       "PlaceHoldRequest": {
@@ -208,6 +408,163 @@
         "title": "PostingResponse",
         "type": "object"
       },
+      "StatementLine": {
+        "properties": {
+          "amount_minor": {
+            "title": "Amount Minor",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "direction": {
+            "title": "Direction",
+            "type": "string"
+          },
+          "entry_id": {
+            "title": "Entry Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "natural_delta_minor": {
+            "title": "Natural Delta Minor",
+            "type": "integer"
+          },
+          "posting_id": {
+            "title": "Posting Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "posting_id",
+          "entry_id",
+          "idempotency_key",
+          "direction",
+          "amount_minor",
+          "natural_delta_minor",
+          "created_at"
+        ],
+        "title": "StatementLine",
+        "type": "object"
+      },
+      "StatementResponse": {
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/StatementLine"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "account_id",
+          "lines",
+          "next_cursor"
+        ],
+        "title": "StatementResponse",
+        "type": "object"
+      },
+      "TrialBalanceResponse": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "balanced": {
+            "title": "Balanced",
+            "type": "boolean"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/TrialBalanceRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "total_credit_minor": {
+            "title": "Total Credit Minor",
+            "type": "integer"
+          },
+          "total_debit_minor": {
+            "title": "Total Debit Minor",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "as_of",
+          "rows",
+          "total_debit_minor",
+          "total_credit_minor",
+          "balanced"
+        ],
+        "title": "TrialBalanceResponse",
+        "type": "object"
+      },
+      "TrialBalanceRow": {
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "account_type": {
+            "title": "Account Type",
+            "type": "string"
+          },
+          "balance_minor": {
+            "title": "Balance Minor",
+            "type": "integer"
+          },
+          "credit_minor": {
+            "title": "Credit Minor",
+            "type": "integer"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "debit_minor": {
+            "title": "Debit Minor",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account_id",
+          "account_type",
+          "currency",
+          "debit_minor",
+          "credit_minor",
+          "balance_minor"
+        ],
+        "title": "TrialBalanceRow",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -256,6 +613,75 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/internal/v1/integrity-report": {
+      "post": {
+        "description": "Daily job: verify invariants, snapshot balances, and recheck the snapshot from postings.",
+        "operationId": "integrity_report_internal_v1_integrity_report_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-ledger-provisioning-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ledger-Provisioning-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrityReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Integrity Report"
+      }
+    },
+    "/v1/accounts": {
+      "get": {
+        "operationId": "list_accounts_v1_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountSummary"
+                  },
+                  "title": "Response List Accounts V1 Accounts Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Accounts"
+      }
+    },
     "/v1/accounts/{account_id}/balance": {
       "get": {
         "operationId": "get_balance_v1_accounts__account_id__balance_get",
@@ -297,6 +723,77 @@
         "summary": "Get Balance"
       }
     },
+    "/v1/accounts/{account_id}/statement": {
+      "get": {
+        "description": "Newest-first postings for an account (and its shards), keyset-paginated by posting ID.",
+        "operationId": "account_statement_v1_accounts__account_id__statement_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Statement"
+      }
+    },
     "/v1/entries": {
       "post": {
         "operationId": "post_entry_v1_entries_post",
@@ -335,6 +832,89 @@
         "summary": "Post Entry"
       }
     },
+    "/v1/entries/by-key": {
+      "get": {
+        "description": "Tell a recovering caller whether a deterministic key already committed.",
+        "operationId": "entry_by_key_v1_entries_by_key_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "idempotency_key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Idempotency Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryLookupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Entry By Key"
+      }
+    },
+    "/v1/entries/{entry_id}": {
+      "get": {
+        "operationId": "entry_detail_v1_entries__entry_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "title": "Entry Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Entry Detail"
+      }
+    },
     "/v1/holds": {
       "post": {
         "operationId": "place_hold_v1_holds_post",
@@ -371,6 +951,47 @@
           }
         },
         "summary": "Place Hold"
+      }
+    },
+    "/v1/holds/by-key": {
+      "get": {
+        "operationId": "hold_by_key_v1_holds_by_key_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "idempotency_key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Idempotency Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldLookupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Hold By Key"
       }
     },
     "/v1/holds/{hold_id}/post": {
@@ -475,6 +1096,53 @@
           }
         },
         "summary": "Verify Integrity"
+      }
+    },
+    "/v1/trial-balance": {
+      "get": {
+        "operationId": "trial_balance_v1_trial_balance_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "as_of",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrialBalanceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trial Balance"
       }
     }
   }

@@ -1,6 +1,7 @@
-.PHONY: up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
+CHAOS_FLOW_SCENARIOS ?= 2000
 
 up:
 	docker compose up -d --wait
@@ -26,29 +27,13 @@ openapi:
 	uv run python -m scripts.export_core_openapi
 
 ledger-migrate:
-	@version=$$(docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -tAc "SELECT version FROM ledger_schema_migrations WHERE version = 1" 2>/dev/null || true); \
-	if [ "$$version" = "1" ]; then echo "Ledger schema version 1 is already applied"; \
-	else docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < services/ledger/migrations/0001_initial.sql; fi
-	@version=$$(docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -tAc "SELECT version FROM ledger_schema_migrations WHERE version = 2" 2>/dev/null || true); \
-	if [ "$$version" = "2" ]; then echo "Ledger schema version 2 is already applied"; \
-	else docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < services/ledger/migrations/0002_hold_reservation_per_account.sql; fi
+	uv run python -m scripts.migrate ledger
 
 ledger-test-integration: ledger-migrate
 	docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < tests/integration/ledger_posting.sql
 
 gateway-migrate:
-	@version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM gateway_schema_migrations WHERE version = 1" 2>/dev/null || true); \
-	if [ "$$version" = "1" ]; then echo "Gateway schema version 1 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/api_gateway/migrations/0001_gateway_auth.sql; fi; \
-	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM gateway_schema_migrations WHERE version = 2" 2>/dev/null || true); \
-	if [ "$$version" = "2" ]; then echo "Gateway schema version 2 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/api_gateway/migrations/0002_expired_idempotency_reuse.sql; fi; \
-	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM gateway_schema_migrations WHERE version = 3" 2>/dev/null || true); \
-	if [ "$$version" = "3" ]; then echo "Gateway schema version 3 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/api_gateway/migrations/0003_gateway_state_cleanup.sql; fi; \
-	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM gateway_schema_migrations WHERE version = 4" 2>/dev/null || true); \
-	if [ "$$version" = "4" ]; then echo "Gateway schema version 4 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/api_gateway/migrations/0004_restrict_api_key_reads.sql; fi
+	uv run python -m scripts.migrate gateway
 
 gateway-test-integration: gateway-migrate
 	docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < tests/integration/gateway_auth.sql
@@ -58,30 +43,14 @@ gateway-cleanup:
 	docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 -c "SELECT * FROM gateway_cleanup_expired_state(10000)"
 
 vault-migrate:
-	@version=$$(docker compose exec -T postgres-vault psql -U tally -d tally_vault -tAc "SELECT version FROM vault_schema_migrations WHERE version = 1" 2>/dev/null || true); \
-	if [ "$$version" = "1" ]; then echo "Vault schema version 1 is already applied"; \
-	else docker compose exec -T postgres-vault psql -U tally -d tally_vault -v ON_ERROR_STOP=1 < services/vault/migrations/0001_vault.sql; fi
+	uv run python -m scripts.migrate vault
 
 vault-test-integration: vault-migrate
 	docker compose exec -T postgres-vault psql -U tally -d tally_vault -v ON_ERROR_STOP=1 < tests/integration/vault_access.sql
 	VAULT_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55434/tally_vault uv run pytest tests/integration/test_vault_api.py tests/integration/test_vault_network.py
 
-core-migrate:
-	@version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM core_schema_migrations WHERE version = 1" 2>/dev/null || true); \
-	if [ "$$version" = "1" ]; then echo "Core schema version 1 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0001_payment_orchestration.sql; fi; \
-	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM core_schema_migrations WHERE version = 2" 2>/dev/null || true); \
-	if [ "$$version" = "2" ]; then echo "Core schema version 2 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0002_payment_recovery.sql; fi; \
-	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM core_schema_migrations WHERE version = 3" 2>/dev/null || true); \
-	if [ "$$version" = "3" ]; then echo "Core schema version 3 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0003_late_success_incidents.sql; fi; \
-	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM core_schema_migrations WHERE version = 4" 2>/dev/null || true); \
-	if [ "$$version" = "4" ]; then echo "Core schema version 4 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0004_bank_recovery_policies.sql; fi; \
-	version=$$(docker compose exec -T postgres-general psql -U tally -d tally -tAc "SELECT version FROM core_schema_migrations WHERE version = 5" 2>/dev/null || true); \
-	if [ "$$version" = "5" ]; then echo "Core schema version 5 is already applied"; \
-	else docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/migrations/0005_card_late_success_incidents.sql; fi
+core-migrate: gateway-migrate
+	uv run python -m scripts.migrate core
 
 core-test-integration: core-migrate gateway-migrate vault-migrate seed
 	REDIS_URL=redis://127.0.0.1:6379/0 TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally VAULT_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55434/tally_vault LEDGER_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55433/tally_ledger_v1 uv run pytest tests/integration/test_payment_flow.py
@@ -108,8 +77,15 @@ seed: ledger-migrate core-migrate
 	docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < services/ledger/seeds/001_local_chart.sql
 	docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < services/core/seeds/001_local_vpas.sql
 
+migrate:
+	uv run python -m scripts.migrate gateway core ledger vault recon risk backoffice
+
+stack-test-integration:
+	TALLY_STACK_TESTS=1 REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_crash_recovery.py
+
 chaos:
 	uv run python -m chaos.chaos_sim
+	uv run python -m chaos.flow_sim --scenarios $(CHAOS_FLOW_SCENARIOS)
 
 simulate train loadtest demo deploy-dev destroy-dev:
 	@echo "$@ is not available yet. See docs/PROGRESS.md for implementation status."

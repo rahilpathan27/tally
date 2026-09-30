@@ -30,11 +30,20 @@ def request_fingerprint(method: str, path: str, body: bytes) -> bytes:
 
 
 class PostgresIdempotencyStore:
-    def __init__(self, pool: asyncpg.Pool, *, retention: timedelta = timedelta(hours=24)) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        *,
+        retention: timedelta = timedelta(hours=24),
+        lease: timedelta = timedelta(seconds=60),
+    ) -> None:
         if retention <= timedelta(0):
             raise ValueError("retention must be positive")
+        if not timedelta(seconds=1) <= lease <= timedelta(hours=1):
+            raise ValueError("lease must be between one second and one hour")
         self._pool = pool
         self._retention = retention
+        self._lease_seconds = int(lease.total_seconds())
 
     async def begin(self, merchant_id: str, key: str, fingerprint: bytes) -> IdempotencyResult:
         if len(fingerprint) != 32:
@@ -46,11 +55,12 @@ class PostgresIdempotencyStore:
                 )
                 row = await connection.fetchrow(
                     """SELECT outcome, response_status, response_body::text AS response_body
-                         FROM gateway_begin_idempotency($1, $2, $3, $4)""",
+                         FROM gateway_begin_idempotency($1, $2, $3, $4, $5)""",
                     merchant_id,
                     key,
                     fingerprint,
                     datetime.now(UTC) + self._retention,
+                    self._lease_seconds,
                 )
         except asyncpg.UniqueViolationError as exc:
             raise IdempotencyPayloadConflict("idempotency key payload mismatch") from exc
@@ -85,4 +95,12 @@ class PostgresIdempotencyStore:
                 fingerprint,
                 response_status,
                 json.dumps(response_body, separators=(",", ":")),
+            )
+
+    async def release(self, merchant_id: str, key: str, fingerprint: bytes) -> None:
+        """Drop an in-progress reservation so a retry after a 5xx can run again."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            await connection.execute("SELECT set_config('app.merchant_id', $1, true)", merchant_id)
+            await connection.execute(
+                "SELECT gateway_release_idempotency($1, $2, $3)", merchant_id, key, fingerprint
             )

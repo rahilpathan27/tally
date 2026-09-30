@@ -50,6 +50,33 @@ The verified card flow is `created → authorizing → authorized → capturing 
 
 There is no distributed transaction across the general database, ledger, vault, or simulators. The durable command is written before an external ledger call. If the process stops after the ledger commits but before the core stores the response, the deterministic ledger key permits replay without creating another entry. Recovery leases expire after 30 seconds if a worker crashes. Status retries use exponential delays capped at five minutes; the worker polls every second. The default UPI policy checks status for 30 seconds and watches for late success for 10 minutes. Both windows and the deemed outcome can be configured per remitter bank and amount tier in `core_bank_recovery_policies`. Card unknown outcomes use the same recovery worker and their configured decision window. A deemed-success policy accepts the risk that external status remains unknown at the deadline. Simulator transaction state and idempotency caches are process-local, so simulator restarts can lose status evidence. Circuit breakers are process-local and protect the bank and card simulator endpoints. UPI routing uses the registered payer and payee VPAs to choose the remitter and beneficiary banks; failover to a different bank is intentionally not attempted because it would change the payment route. Outbox events remain stored but are not yet published to Redpanda.
 
+## Crash windows (orchestrator process killed between durable effects)
+
+Every row is exercised by `tests/integration/test_crash_recovery.py` (crash at the named
+`services/core/faults.py` point, with the external party's status both visible and hidden until
+after the decision deadline) and by the randomized `chaos/flow_sim.py` harness.
+
+| Crash point | Durable state at crash | Recovery | Result |
+| --- | --- | --- | --- |
+| `confirm.after_authorizing_committed` | `authorizing` + pending command; nothing sent | Stalled sweeper (default 30 s) moves to `pending_unknown`; status is `not_found`; deadline reverses | `reversed`, no ledger effect |
+| `card.after_network_approved` | Network approved; no hold | Sweeper → `pending_unknown`; ledger lookup finds no hold; network status `approved` places the stored hold | `authorized`; if status was unavailable until after the deadline, `reversed` and the late approval's hold is placed then voided with an incident |
+| `card.after_hold_placed` | Hold exists; core does not know | Ledger lookup-by-key finds the pending hold | `authorized` with that hold |
+| `upi.after_psp_approved` | PSP approved; no bank leg sent | Sweeper → `pending_unknown`; bank `not_found` | `reversed`, no ledger effect |
+| `upi.after_bank_approved` | Bank moved money; no ledger entry | Bank status `approved` posts the stored command; if status is hidden past the deadline, the payment reverses and the later success is posted to suspense with an incident | `succeeded`, or `reversed` + suspense correction for reconciliation |
+| `upi.after_ledger_posted` | Ledger entry committed; core does not know | Ledger lookup-by-key finds the entry before any status decision | `succeeded` (never reversed) |
+| `capture.after_capturing_committed` / `capture.after_hold_posted` | `capturing`; hold pending or posted | Sweeper replays idempotent `POST /v1/holds/{id}/post` | `succeeded`, one capture journal |
+| `cancel.after_cancelled_committed` | `cancelled`; hold pending | Sweeper replays idempotent hold void | Hold `void` |
+| `recovery.after_ledger_call` | Worker died after a ledger call | Lease expires; the next worker repeats the same deterministic key | Same entry/hold returned; single effect |
+
+Two rules make these windows safe: (1) recovery never decides an outcome before asking the
+ledger whether the payment's deterministic key already committed (a lookup failure postpones the
+decision), and (2) every external and ledger call is replayable with a deterministic key.
+
+Merchant-facing idempotency: a handler that fails with 5xx releases its reservation so the merchant
+can retry; 4xx results are stored and replayed; a reservation held by a crashed request expires
+after a 60-second lease and the next retry takes it over. Re-running a handler is safe because each
+effect below it is guarded by state-machine transitions and deterministic keys.
+
 ## Verification
 
 The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. `test_card_and_upi_happy_paths_and_illegal_transition_are_audited` covers direct card, payer PSP and bank declines; card response loss followed by hold recovery; late card authorization voiding; UPI lost response followed by success; auto-reversal after status deadline; late success corrected to suspense; configured deemed success; and debit-success/credit-failure with a lost reversal response. Unit tests cover simulator outage modes, idempotency, and circuit-breaker behavior. These checks cover the implemented local failure matrix; they do not claim alternate-bank failover, throughput, chaos safety, real-rail behavior, or production payment guarantees.
