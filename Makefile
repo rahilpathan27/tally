@@ -48,7 +48,7 @@ gateway-migrate:
 
 gateway-test-integration: gateway-migrate
 	docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 < tests/integration/gateway_auth.sql
-	GENERAL_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_gateway_auth_dependency.py tests/integration/test_idempotency_postgres.py tests/integration/test_rate_limit_redis.py
+	GENERAL_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally REDIS_URL=redis://127.0.0.1:6379/0 uv run pytest tests/integration/test_gateway_auth_dependency.py tests/integration/test_gateway_route.py tests/integration/test_idempotency_postgres.py tests/integration/test_rate_limit_redis.py
 
 gateway-cleanup:
 	docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 -c "SELECT * FROM gateway_cleanup_expired_state(10000)"

@@ -28,7 +28,7 @@ uv run python -m scripts.manage_gateway_keys create \
   --scope payments:write --mode test
 ```
 
-Revoke a key with `uv run python -m scripts.manage_gateway_keys revoke --key-id <key_id>`. This local AES-GCM key wrapper is for simulation use; production requires managed KMS/envelope encryption and secure key rotation.
+Revoke a key with `uv run python -m scripts.manage_gateway_keys revoke --key-id <key_id>` or replace it atomically with `uv run python -m scripts.manage_gateway_keys rotate --key-id <key_id>`. These commands print a new secret once. Local AES-GCM is for simulation use; production requires managed KMS/envelope encryption.
 
 Run the internal ledger HTTP service in its own terminal with `make ledger-api`. Stop it with Ctrl+C. When finished with the local dependencies, run `make down` in another terminal.
 

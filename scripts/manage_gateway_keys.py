@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import json
 import os
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -36,6 +37,9 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--expires-in-days", type=int, default=90)
     revoke = commands.add_parser("revoke", help="revoke a merchant API key")
     revoke.add_argument("--key-id", required=True)
+    rotate = commands.add_parser("rotate", help="replace an active key atomically")
+    rotate.add_argument("--key-id", required=True, help="active key to replace")
+    rotate.add_argument("--expires-in-days", type=int, default=90)
     return parser
 
 
@@ -116,12 +120,71 @@ async def _revoke_key(key_id: str, database_url: str) -> None:
     print(f"revoked key_id={key_id}")
 
 
+async def _rotate_key(args: argparse.Namespace, database_url: str, cipher: ApiKeyCipher) -> None:
+    if args.expires_in_days <= 0 or args.expires_in_days > 3650:
+        raise ValueError("expires-in-days must be between 1 and 3650")
+    connection = await asyncpg.connect(database_url)
+    key_id = ""
+    expiry = datetime.now(UTC) + timedelta(days=args.expires_in_days)
+    secret = secrets.token_bytes(32)
+    encoded_secret = base64.urlsafe_b64encode(secret).rstrip(b"=").decode("ascii")
+    try:
+        async with connection.transaction():
+            prior = await connection.fetchrow(
+                """SELECT merchant_id, scopes, mode FROM merchant_api_keys
+                    WHERE key_id = $1 AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > clock_timestamp())
+                    FOR UPDATE""",
+                args.key_id,
+            )
+            if prior is None:
+                raise ValueError("active API key was not found")
+            mode = str(prior["mode"])
+            key_id = f"tly_{mode}_{secrets.token_urlsafe(12)}"
+            merchant_id = str(prior["merchant_id"])
+            await connection.execute(
+                """UPDATE merchant_api_keys SET revoked_at = clock_timestamp()
+                    WHERE key_id = $1 AND revoked_at IS NULL""",
+                args.key_id,
+            )
+            await connection.execute(
+                """INSERT INTO merchant_api_keys(
+                       key_id, merchant_id, secret_ciphertext, scopes, mode, expires_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6)""",
+                key_id,
+                merchant_id,
+                cipher.encrypt(key_id, secret),
+                prior["scopes"],
+                mode,
+                expiry,
+            )
+            await connection.execute("SELECT set_config('app.merchant_id', $1, true)", merchant_id)
+            event_data = json.dumps(
+                {"old_key_id": args.key_id, "new_key_id": key_id}, separators=(",", ":")
+            )
+            await connection.fetchval(
+                """SELECT gateway_append_audit_event(
+                       $1, NULL, 'api_key.rotate', $2, $3::jsonb
+                   )""",
+                merchant_id,
+                key_id,
+                event_data,
+            )
+    finally:
+        await connection.close()
+    print(f"key_id={key_id}")
+    print(f"secret={encoded_secret}")
+    print(f"expires_at={expiry.isoformat()}")
+
+
 async def _run(args: argparse.Namespace) -> None:
     database_url, cipher = _configuration()
     if args.command == "create":
         await _create_key(args, database_url, cipher)
     elif args.command == "revoke":
         await _revoke_key(args.key_id, database_url)
+    elif args.command == "rotate":
+        await _rotate_key(args, database_url, cipher)
     else:
         raise RuntimeError("unsupported command")
 
