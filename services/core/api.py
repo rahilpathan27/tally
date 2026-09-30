@@ -96,6 +96,8 @@ class PaymentIntentRepository:
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.execute("SELECT set_config('app.merchant_id', $1, true)", merchant_id)
             if body.payment_method_type == "upi":
+                if body.payer_vpa == body.payee_vpa:
+                    raise ValueError("payer and payee VPAs must be different")
                 found = await connection.fetchval(
                     """SELECT count(*) = 2 FROM core_vpas
                        WHERE vpa = ANY($1::text[]) AND active""",
@@ -243,9 +245,14 @@ class PaymentIntentRepository:
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.execute("SELECT set_config('app.merchant_id', $1, true)", merchant_id)
             return await connection.fetchrow(
-                """SELECT payment_id, amount_minor, currency, payment_method_type, status,
-                          payment_method_token, payer_vpa, payee_vpa, ledger_hold_id, created_at
-                   FROM payment_intents WHERE payment_id = $1 AND merchant_id = $2""",
+                """SELECT p.payment_id, p.amount_minor, p.currency, p.payment_method_type, p.status,
+                          p.payment_method_token, p.payer_vpa, p.payee_vpa, p.ledger_hold_id,
+                          p.created_at, payer.bank_id AS remitter_bank,
+                          payee.bank_id AS beneficiary_bank
+                   FROM payment_intents p
+                   LEFT JOIN core_vpas payer ON payer.vpa = p.payer_vpa
+                   LEFT JOIN core_vpas payee ON payee.vpa = p.payee_vpa
+                   WHERE p.payment_id = $1 AND p.merchant_id = $2""",
                 payment_id,
                 merchant_id,
             )
@@ -533,8 +540,8 @@ def create_app() -> FastAPI:
                     "/v1/transfers",
                     json={
                         "payment_id": str(payment_id),
-                        "remitter_bank": payment["payer_vpa"].split("@", 1)[1],
-                        "beneficiary_bank": payment["payee_vpa"].split("@", 1)[1],
+                        "remitter_bank": payment["remitter_bank"],
+                        "beneficiary_bank": payment["beneficiary_bank"],
                         "amount_minor": amount,
                         "currency": payment["currency"].strip(),
                     },

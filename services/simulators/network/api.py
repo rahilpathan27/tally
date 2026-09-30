@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hmac
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -45,10 +47,19 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
         )
     if config.mode not in {"approve", "decline", "http_500"}:
         raise RuntimeError("card network mode must be approve, decline, or http_500")
-    app = FastAPI(title="Tally Card Network Simulator", version="1.0.0")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        client = httpx.AsyncClient(timeout=5.0)
+        app.state.http_client = client
+        try:
+            yield
+        finally:
+            await client.aclose()
+
+    app = FastAPI(title="Tally Card Network Simulator", version="1.0.0", lifespan=lifespan)
     app.state.config = config
     app.state.requests = {}
-    app.state.http_client = httpx.AsyncClient(timeout=5.0)
 
     @app.get("/health/live", include_in_schema=False)
     async def live() -> dict[str, str]:

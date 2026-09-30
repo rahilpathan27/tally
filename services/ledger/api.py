@@ -206,7 +206,7 @@ async def provision_merchant_account(
             body.currency,
         )
         existing = await connection.fetchrow(
-            """SELECT account_type::text, currency FROM ledger_accounts
+            """SELECT account_type::text, currency, allow_negative, closed FROM ledger_accounts
                WHERE account_id = $1 FOR UPDATE""",
             account_id,
         )
@@ -214,6 +214,8 @@ async def provision_merchant_account(
             existing is None
             or existing["account_type"] != "liability"
             or existing["currency"].strip() != body.currency
+            or existing["allow_negative"]
+            or existing["closed"]
         ):
             raise HTTPException(
                 status.HTTP_409_CONFLICT, "merchant ledger account conflicts with chart"

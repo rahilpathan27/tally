@@ -86,6 +86,5 @@ def test_simulator_failure_modes_and_message_idempotency() -> None:
         await bank.aclose()
         await psp.aclose()
         await network.aclose()
-        await network_app.state.http_client.aclose()
 
     asyncio.run(exercise())

@@ -271,7 +271,7 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                         "SELECT count(*) FROM core_outbox WHERE aggregate_id = ANY($1::uuid[])",
                         [UUID(card_id), UUID(cancel_id), UUID(upi_id)],
                     )
-                    >= 6
+                    == 12
                 )
                 assert (
                     await ledger_pool.fetchval(
@@ -280,7 +280,9 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                     )
                     == 1
                 )
-                await ledger_pool.fetchval("SELECT ledger_verify_integrity()")
+                assert await ledger_pool.fetchval(
+                    "SELECT bool_and(ok) FROM ledger_verify_integrity()"
+                ) is True
             finally:
                 await client.aclose()
                 await core_app.state.ledger_http.aclose()
