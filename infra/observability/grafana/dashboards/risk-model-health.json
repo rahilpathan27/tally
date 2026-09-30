@@ -1,0 +1,171 @@
+{
+  "uid": "tally-risk-model-health",
+  "title": "Risk and Model Health",
+  "tags": [
+    "tally"
+  ],
+  "timezone": "Asia/Kolkata",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Decisions / s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (decision) (rate(tally_risk_decisions_total[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Decision p99 latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(tally_risk_decision_duration_seconds_bucket[5m])))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Fail-policy decisions (15m)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(tally_risk_unavailable_total[15m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Feature drift (PSI)",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_model_drift_psi",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Review queue",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_risk_review_queue",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    }
+  ]
+}

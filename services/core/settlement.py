@@ -28,6 +28,7 @@ import asyncpg
 import httpx
 from libs.common.business_time import cutoff_instant, last_closed_business_date
 from libs.money import Currency
+from libs.observability.metrics import PAYOUTS_RETURNED, SETTLEMENT_FAILURES
 from pydantic import BaseModel
 
 from services.core.faults import fault_point
@@ -555,6 +556,8 @@ async def process_payout(
         await execute_command(ctx, command)
     except LedgerUnavailable:
         return "pending_ledger"
+    if outcome != "paid":
+        PAYOUTS_RETURNED.inc()
     return "paid" if outcome == "paid" else "returned"
 
 
@@ -586,6 +589,10 @@ async def settle_due_merchants(ctx: MoneyContext, now: datetime) -> int:
         )
         if exists:
             continue
-        await run_settlement(ctx, str(row["merchant_id"]), business_date)
+        try:
+            await run_settlement(ctx, str(row["merchant_id"]), business_date)
+        except Exception:
+            SETTLEMENT_FAILURES.inc()
+            raise
         settled += 1
     return settled

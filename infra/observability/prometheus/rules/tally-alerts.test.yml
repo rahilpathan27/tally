@@ -1,0 +1,98 @@
+rule_files:
+  - tally-alerts.yml
+evaluation_interval: 30s
+tests:
+  - interval: 30s
+    input_series:
+      - series: 'tally_ledger_integrity_ok{check="entries_balanced"}'
+        values: '1 1 0 0'
+      - series: 'tally_ledger_integrity_ok{check="hash_chain"}'
+        values: '1 1 1 1'
+    alert_rule_test:
+      - {eval_time: 30s, alertname: LedgerInvariantViolation, exp_alerts: []}
+      - eval_time: 90s
+        alertname: LedgerInvariantViolation
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Ledger integrity check failing: "
+              description: "A ledger invariant (balanced entries, balances vs postings, hash chain or trial balance) failed. Treat as money at risk."
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/ledger-discrepancy.md
+  - interval: 30s
+    input_series:
+      - series: 'tally_pending_unknown_oldest_age_seconds'
+        values: '0+30x40'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: PendingUnknownStuck, exp_alerts: []}
+      - eval_time: 9m
+        alertname: PendingUnknownStuck
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "A payment has been in an unknown outcome for 9m 0s"
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/stuck-pending-unknown.md
+  - interval: 30s
+    input_series:
+      # bank-a: 1 approval/s then approvals stop while failures continue (outage).
+      - series: 'tally_bank_outcomes_total{bank="bank-a",outcome="approved"}'
+        values: '0+30x10 300x20'
+      - series: 'tally_bank_outcomes_total{bank="bank-a",outcome="no_response"}'
+        values: '0x10 0+30x20'
+      - series: 'tally_bank_outcomes_total{bank="bank-b",outcome="approved"}'
+        values: '0+30x30'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: BankSuccessRateDrop, exp_alerts: []}
+      - eval_time: 14m
+        alertname: BankSuccessRateDrop
+        exp_alerts:
+          - exp_labels: {severity: page, bank: bank-a}
+            exp_annotations:
+              summary: "Bank bank-a success rate is 0%"
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/bank-outage.md
+  - interval: 1m
+    input_series:
+      - series: 'tally_http_requests_total{service="core",route="/v1/payment_intents",status="201"}'
+        values: '0+600x90'
+      - series: 'tally_http_requests_total{service="core",route="/v1/payment_intents",status="503"}'
+        values: '0+60x90'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: ErrorBudgetBurnFast
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Merchant API is burning its monthly error budget 14x too fast"
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/error-budget.md
+  - interval: 1m
+    input_series:
+      - series: 'tally_risk_unavailable_total{mode="open"}'
+        values: '0 0 3 5'
+      - series: 'tally_auth_events_total{event="refresh_token_reuse"}'
+        values: '0 0 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RiskServiceUnavailable
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Payments are being decided by the fail-open/closed policy"
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/risk-service-failure.md
+      - eval_time: 3m
+        alertname: RefreshTokenReuse
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "A rotated back-office refresh token was replayed (possible session theft)"
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/security-event.md
+  - interval: 30s
+    input_series:
+      - series: 'tally_bank_outcomes_total{bank="bank-a",outcome="breaker_open"}'
+        values: '0 0 5 10 15 20 25 30 35 40'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CircuitBreakerOpen
+        exp_alerts:
+          - exp_labels: {severity: ticket, bank: bank-a}
+            exp_annotations:
+              summary: "Payments to bank-a are being short-circuited by the circuit breaker"
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/bank-outage.md

@@ -1,0 +1,171 @@
+{
+  "uid": "tally-switch-bank-health",
+  "title": "Switch and Bank Health",
+  "tags": [
+    "tally"
+  ],
+  "timezone": "Asia/Kolkata",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Bank success rate",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (bank) (rate(tally_bank_outcomes_total{outcome=\"approved\"}[5m])) / sum by (bank) (rate(tally_bank_outcomes_total[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Bank outcomes / s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (bank, outcome) (rate(tally_bank_outcomes_total[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Oldest pending_unknown",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_pending_unknown_oldest_age_seconds",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Recovery lag",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_recovery_lag_seconds",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Circuit breakers (1 = open)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_circuit_breaker_open",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    }
+  ]
+}

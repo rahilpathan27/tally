@@ -21,6 +21,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from libs.common.object_store import S3ObjectStore
 from libs.idempotency.store import PostgresIdempotencyStore
+from libs.observability.metrics import BANK_OUTCOMES, instrument
+from libs.observability.tracing import configure_tracing
 from libs.security.http import SecurityMiddleware
 from libs.security.key_encryption import ApiKeyCipher
 from libs.security.rate_limit import MerchantRateLimiter
@@ -53,6 +55,7 @@ from services.core.schemas import (
 )
 from services.core.state_machine import PaymentState
 from services.core.webhooks import KafkaPublisher
+from services.workers.metrics_collector import collect as collect_metrics
 
 __all__ = [
     "PaymentIntentRepository",
@@ -252,6 +255,7 @@ async def authorize_payment(
         bank: httpx.AsyncClient = state.bank_http
         breaker: CircuitBreaker = state.bank_breaker
         if not breaker.allow_request():
+            BANK_OUTCOMES.labels(payment["remitter_bank"], "breaker_open").inc()
             await repo.transition(
                 payment_id,
                 merchant_id,
@@ -277,6 +281,7 @@ async def authorize_payment(
             breaker.record_success()
         except httpx.HTTPError:
             breaker.record_failure()
+            BANK_OUTCOMES.labels(payment["remitter_bank"], "no_response").inc()
             await repo.transition(
                 payment_id,
                 merchant_id,
@@ -287,6 +292,7 @@ async def authorize_payment(
             )
             return ConfirmResponse(payment_id=payment_id, status="pending_unknown")
         transfer_status = transfer_response.json().get("status")
+        BANK_OUTCOMES.labels(payment["remitter_bank"], str(transfer_status)).inc()
         if transfer_status == "debit_succeeded_credit_failed":
             try:
                 reversal_response = await bank.post(f"/v1/transfers/{payment_id}/reverse")
@@ -454,13 +460,17 @@ def create_app() -> FastAPI:
                         app.state.payment_repository,
                         app.state.bank_http,
                         app.state.ledger_http,
-                        app.state.bank_breaker,
+                        app.state.bank_status_breaker,
                         network_http=app.state.card_network_http,
-                        network_breaker=app.state.card_network_breaker,
+                        network_breaker=app.state.card_network_status_breaker,
                     )
                     await sweep_stalled_payments(
                         app.state.payment_repository, app.state.ledger_http
                     )
+                    try:
+                        await collect_metrics(app.state.pool, app.state)
+                    except asyncpg.PostgresError:
+                        logger.exception("metrics collection failed")
                     # Settlement scheduling is idempotent; checking once a minute is enough.
                     await run_money_workers(app.state, settle=cycles % 60 == 0)
                     cycles += 1
@@ -493,11 +503,17 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Tally Payment API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(SecurityMiddleware, max_body_bytes=2_000_000)
+    instrument(app, "core")
+    configure_tracing("core", app)
     app.state.payment_repository = None
     app.state.provisioned_merchants = set()
     app.state.fault_injector = None
     app.state.risk_http = None
     app.state.risk_key = ""
+    # Dispatch and status-check breakers are separate: a healthy status API must not close the
+    # breaker protecting a failing transfer API (found by the Phase 13 alert drill).
+    app.state.bank_status_breaker = CircuitBreaker()
+    app.state.card_network_status_breaker = CircuitBreaker()
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -521,9 +537,9 @@ def create_app() -> FastAPI:
             _repository(request),
             request.app.state.bank_http,
             request.app.state.ledger_http,
-            request.app.state.bank_breaker,
+            request.app.state.bank_status_breaker,
             network_http=request.app.state.card_network_http,
-            network_breaker=request.app.state.card_network_breaker,
+            network_breaker=request.app.state.card_network_status_breaker,
         )
         processed += await sweep_stalled_payments(
             _repository(request), request.app.state.ledger_http

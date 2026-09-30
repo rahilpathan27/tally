@@ -19,6 +19,7 @@ from typing import Annotated, Any, cast
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Request, Response
+from libs.observability.metrics import AUTH_EVENTS
 from libs.security import jwt_tokens, totp
 from libs.security.passwords import DUMMY_HASH, verify_password
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,6 +76,7 @@ def _ring(request: Request) -> jwt_tokens.KeyRing:
 
 
 async def _audit(pool: asyncpg.Pool, actor: str, action: str, details: dict[str, Any]) -> None:
+    AUTH_EVENTS.labels(action).inc()
     await pool.execute(
         "SELECT audit_append($1, $2, $3, NULL, $4::jsonb)",
         actor,
@@ -239,6 +241,7 @@ async def refresh(request: Request, response: Response) -> dict[str, Any]:
                 json.dumps({"family_id": str(row["family_id"])}),
             )
             failure = "Session revoked."
+            AUTH_EVENTS.labels("refresh_token_reuse").inc()
         elif row["expires_at"] <= datetime.now(UTC):
             failure = "Session expired."
         else:

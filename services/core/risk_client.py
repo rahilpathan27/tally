@@ -8,6 +8,7 @@ from typing import Any
 
 import asyncpg
 import httpx
+from libs.observability.metrics import RISK_FAIL_POLICY
 
 RISK_TIMEOUT_SECONDS = 0.1
 
@@ -75,6 +76,7 @@ async def assess_payment_risk(state: Any, payment: asyncpg.Record) -> RiskOutcom
         body = response.json()
     except (httpx.HTTPError, ValueError):
         mode = await fail_mode(state.pool, str(payment["merchant_id"]))
+        RISK_FAIL_POLICY.labels(mode).inc()
         if mode == "closed":
             return RiskOutcome("block", "fail_closed", ["RISK_UNAVAILABLE"])
         return RiskOutcome("allow", "fail_open", ["RISK_UNAVAILABLE"])

@@ -22,6 +22,7 @@ import copy
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -43,11 +44,13 @@ from libs.common.object_store import FilesystemObjectStore
 from libs.observability.logging import configure_logging
 from services.core.money_routes import run_money_workers
 from services.core.recovery_worker import process_recovery_batch, sweep_stalled_payments
+from services.ledger.api import run_integrity_check
 from services.recon.api import create_app as create_recon_app
 from services.recon.engine import BankRecord, Kind, ReconConfig
 from services.recon.formats import write_statement
 from services.recon.service import ReconContext, bank_records_from_journal, ingest_file, run_recon
 from services.risk.rules import DEFAULT_RULES
+from services.workers.metrics_collector import collect as collect_metrics
 
 PASSWORD = "correct horse battery staple"
 USERS = {
@@ -255,20 +258,28 @@ async def seed(stack: LocalStack, bo: Backoffice, recon: ReconContext) -> dict[s
 
 async def workers(stack: LocalStack, stop: asyncio.Event) -> None:
     state = stack.core_app.state  # type: ignore[attr-defined]
+    steps: dict[str, Callable[[], Awaitable[object]]] = {
+        "recovery": lambda: process_recovery_batch(
+            state.payment_repository,
+            state.bank_http,
+            state.ledger_http,
+            state.bank_status_breaker,
+            network_http=state.card_network_http,
+            network_breaker=state.card_network_status_breaker,
+        ),
+        "sweeper": lambda: sweep_stalled_payments(state.payment_repository, state.ledger_http),
+        "money": lambda: run_money_workers(state),
+        "metrics": lambda: collect_metrics(stack.general_pool, state),
+        "ledger_verifier": lambda: run_integrity_check(stack.ledger_pool),
+    }
     while not stop.is_set():
-        try:
-            await process_recovery_batch(
-                state.payment_repository,
-                state.bank_http,
-                state.ledger_http,
-                state.bank_breaker,
-                network_http=state.card_network_http,
-                network_breaker=state.card_network_breaker,
-            )
-            await sweep_stalled_payments(state.payment_repository, state.ledger_http)
-            await run_money_workers(state)
-        except Exception:  # noqa: BLE001 - keep the demo running and log the failure
-            log.exception("worker cycle failed")
+        # Each step is isolated so one failing job cannot starve the others (for example the
+        # ledger verifier, which alerting depends on).
+        for name, step in steps.items():
+            try:
+                await step()
+            except Exception:  # noqa: BLE001 - keep the demo running and log the failure
+                log.exception("worker step failed", extra={"step": name})
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=2)
 

@@ -18,6 +18,8 @@ from fastapi import FastAPI, Header, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from libs.observability.metrics import instrument
+from libs.observability.tracing import configure_tracing
 from libs.security.envelope_encryption import EnvelopeCipher
 from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -128,6 +130,8 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Tally Vault", version="1.0.0", lifespan=lifespan)
     app.add_middleware(SecurityMiddleware, max_body_bytes=16_000)
+    instrument(app, "vault")
+    configure_tracing("vault", app)
     origins = [o for o in os.environ.get("TALLY_VAULT_CORS_ORIGINS", "").split(",") if o]
     if origins:
         app.add_middleware(

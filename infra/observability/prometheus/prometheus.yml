@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+rule_files: ["/etc/prometheus/rules/tally-alerts.yml"]
+alerting:
+  alertmanagers:
+    - static_configs: [{targets: ["alertmanager:9093"]}]
+scrape_configs:
+  # The dev stack runs every service in one process, so one endpoint exposes all series
+  # (each labelled with service=...). In Kubernetes each pod is scraped via ServiceMonitors.
+  - job_name: tally
+    metrics_path: /metrics
+    static_configs: [{targets: ["host.docker.internal:8000"], labels: {environment: local}}]

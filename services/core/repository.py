@@ -7,6 +7,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import asyncpg
+from libs.observability.metrics import PAYMENT_TRANSITIONS
 
 from services.core.recovery import recovery_delay_seconds
 from services.core.schemas import CreatePaymentIntent
@@ -158,6 +159,7 @@ class PaymentIntentRepository:
                 correlation_id,
             )
             if accepted:
+                PAYMENT_TRANSITIONS.labels(row["payment_method_type"], target.value).inc()
                 await connection.execute(
                     """UPDATE payment_intents SET status = $3, updated_at = clock_timestamp(),
                            recovery_lease_until = NULL,

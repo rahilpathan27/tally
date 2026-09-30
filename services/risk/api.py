@@ -16,6 +16,8 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from libs.observability.metrics import MODEL_DRIFT_PSI, instrument
+from libs.observability.tracing import configure_tracing
 from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
@@ -132,6 +134,8 @@ def create_app(engine: RiskEngine | None = None, internal_key: str | None = None
 
     app = FastAPI(title="Tally Risk", version="1.0.0", lifespan=lifespan)
     app.add_middleware(SecurityMiddleware, max_body_bytes=256_000)
+    instrument(app, "risk")
+    configure_tracing("risk", app)
     if engine is not None:
         app.state.risk_engine = engine
     app.state.internal_key = internal_key or ""
@@ -273,6 +277,8 @@ def create_app(engine: RiskEngine | None = None, internal_key: str | None = None
                 columns["__score__"].append(float(row["model_score"]))
         report = drift_report(engine_.champion.metadata["baselines"], columns)
         alerts = sum(1 for item in report if item["status"] == "alert")
+        for item in report:
+            MODEL_DRIFT_PSI.labels(item["feature"]).set(item["psi"])
         report_id = uuid.uuid4()
         await engine_.pool.execute(
             """INSERT INTO risk_drift_reports(

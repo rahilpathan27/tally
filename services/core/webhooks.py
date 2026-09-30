@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 import httpx
+from libs.observability.metrics import SSRF_BLOCKED, WEBHOOK_RESULTS
 from libs.security.ssrf import (
     Resolver,
     UnsafeDestination,
@@ -301,6 +302,8 @@ class WebhookDispatcher:
             except httpx.HTTPError as exc:
                 error = f"transport_error: {type(exc).__name__}"
         duration_ms = int((time.monotonic() - started) * 1000)
+        if error and error.startswith("blocked_destination"):
+            SSRF_BLOCKED.inc()
         succeeded = status_code is not None and 200 <= status_code < 300
         attempts = int(row["attempts"]) + 1
         if succeeded:
@@ -310,6 +313,7 @@ class WebhookDispatcher:
         else:
             status = "dead" if attempts >= MAX_ATTEMPTS else "failed"
             error = error or f"http_status_{status_code}"
+        WEBHOOK_RESULTS.labels(status).inc()
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.execute(
                 """INSERT INTO webhook_delivery_attempts(

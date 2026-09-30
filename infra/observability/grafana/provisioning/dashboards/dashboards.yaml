@@ -1,0 +1,3 @@
+apiVersion: 1
+providers:
+  - {name: tally, folder: Tally, type: file, options: {path: /var/lib/grafana/dashboards}}

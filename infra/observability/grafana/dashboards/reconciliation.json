@@ -1,0 +1,109 @@
+{
+  "uid": "tally-reconciliation",
+  "title": "Reconciliation",
+  "tags": [
+    "tally"
+  ],
+  "timezone": "Asia/Kolkata",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Match rate",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_recon_match_rate",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Open breaks by type",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_recon_open_breaks",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Open break value (\u20b9)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyINR"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_recon_open_break_value_minor / 100",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    }
+  ]
+}

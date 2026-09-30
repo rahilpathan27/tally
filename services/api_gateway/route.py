@@ -13,6 +13,7 @@ from libs.idempotency.store import (
     PostgresIdempotencyStore,
     request_fingerprint,
 )
+from libs.observability.metrics import IDEMPOTENT_REPLAYS, MERCHANT_REQUESTS, RATE_LIMITED
 from libs.security.rate_limit import MerchantRateLimiter
 from starlette.responses import JSONResponse, Response
 
@@ -56,6 +57,7 @@ class GatewayRoute(APIRoute):
                 window_seconds=window_seconds,
             )
             if not rate.allowed:
+                RATE_LIMITED.inc()
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail={"code": "RATE_LIMITED", "message": "Request rate limit exceeded."},
@@ -93,6 +95,7 @@ class GatewayRoute(APIRoute):
                         },
                     ) from exc
                 if reservation.outcome == "replay":
+                    IDEMPOTENT_REPLAYS.inc()
                     assert reservation.response_status is not None
                     assert reservation.response_body is not None
                     return JSONResponse(
@@ -111,7 +114,11 @@ class GatewayRoute(APIRoute):
 
             try:
                 response = await original_handler(request)
+                MERCHANT_REQUESTS.labels(
+                    principal.merchant_id, f"{response.status_code // 100}xx"
+                ).inc()
             except HTTPException as exc:
+                MERCHANT_REQUESTS.labels(principal.merchant_id, f"{exc.status_code // 100}xx").inc()
                 if not is_mutation:
                     raise
                 assert idempotency_key is not None and fingerprint is not None

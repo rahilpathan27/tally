@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import asyncpg
+from libs.observability.metrics import RISK_DECISIONS, RISK_LATENCY
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.risk.features import FeatureState, RiskEvent, compute_features
@@ -173,10 +174,12 @@ class RiskEngine:
             decision = "allow"
         else:
             decision = max([model_decision, *actions], key=lambda a: SEVERITY[a])
+        RISK_DECISIONS.labels(decision).inc()
         # Every attempt, including blocked ones, feeds velocity features.
         await self.state.record(event)
         decision_id = uuid.uuid4()
         latency_us = (time.perf_counter_ns() - started) // 1_000
+        RISK_LATENCY.observe(latency_us / 1_000_000)
         case_id: uuid.UUID | None = None
         challenge_id: uuid.UUID | None = None
         async with self.pool.acquire() as connection, connection.transaction():

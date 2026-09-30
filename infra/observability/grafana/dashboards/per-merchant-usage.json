@@ -1,0 +1,78 @@
+{
+  "uid": "tally-per-merchant-usage",
+  "title": "Per-Merchant Usage",
+  "tags": [
+    "tally"
+  ],
+  "timezone": "Asia/Kolkata",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Requests / s by merchant",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (merchant) (rate(tally_merchant_api_requests_total[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Error ratio by merchant",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (merchant) (rate(tally_merchant_api_requests_total{status_class=~\"4xx|5xx\"}[5m])) / sum by (merchant) (rate(tally_merchant_api_requests_total[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    }
+  ]
+}

@@ -14,6 +14,7 @@ from typing import Any, Protocol, cast
 import asyncpg
 import httpx
 from libs.common.business_time import cutoff_instant
+from libs.observability.metrics import RECON_MATCH_RATE, RECON_OPEN_VALUE
 
 from services.recon.engine import (
     BankRecord,
@@ -459,6 +460,9 @@ async def run_recon(ctx: ReconContext, source: str, business_date: date) -> asyn
                 f"run {run_id}",
             )
     assert run is not None
+    if len(bank):
+        RECON_MATCH_RATE.labels(source).set(result.matched_bank_lines / len(bank))
+    RECON_OPEN_VALUE.labels(source).set(open_value)
     return run
 
 

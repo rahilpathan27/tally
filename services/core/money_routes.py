@@ -428,7 +428,12 @@ async def switch_state(request: Request) -> dict[str, Any]:
     require_internal(request)
     state = request.app.state
     out: dict[str, Any] = {}
-    for name in ("bank_breaker", "card_network_breaker"):
+    for name in (
+        "bank_breaker",
+        "card_network_breaker",
+        "bank_status_breaker",
+        "card_network_status_breaker",
+    ):
         breaker = getattr(state, name, None)
         if breaker is not None:
             out[name] = {"open": breaker.is_open, "failures": breaker.failures}

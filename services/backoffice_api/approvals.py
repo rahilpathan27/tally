@@ -15,6 +15,7 @@ from typing import Any
 
 import asyncpg
 import httpx
+from libs.observability.metrics import AUTH_EVENTS
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.backoffice_api.auth import Principal
@@ -161,6 +162,7 @@ async def decide(
     if request is None:
         raise ApprovalError(404, "REQUEST_NOT_FOUND", "Approval request was not found.")
     if request["maker"] == checker.email:
+        AUTH_EVENTS.labels("self_approval_blocked").inc()
         await pool.execute(
             "SELECT audit_append($1, 'approval_self_decision_blocked', $2, NULL, '{}'::jsonb)",
             checker.email,

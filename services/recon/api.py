@@ -21,6 +21,8 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from libs.common.object_store import FilesystemObjectStore, S3ObjectStore
+from libs.observability.metrics import instrument
+from libs.observability.tracing import configure_tracing
 from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -149,6 +151,8 @@ def create_app(ctx: ReconContext | None = None, internal_key: str | None = None)
     app.add_middleware(
         SecurityMiddleware, raw_body_paths=("/v1/files",), large_body_paths=("/v1/files",)
     )
+    instrument(app, "recon")
+    configure_tracing("recon", app)
     if ctx is not None:
         app.state.recon_ctx = ctx
     app.state.internal_key = internal_key or ""

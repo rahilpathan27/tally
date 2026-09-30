@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Path, Query, Request, status
 from libs.money import MAX_SAFE_INTEGER
+from libs.observability.metrics import (
+    LEDGER_INTEGRITY_OK,
+    LEDGER_INTEGRITY_RUNS,
+    LEDGER_POST_LATENCY,
+    LEDGER_POSTS,
+    instrument,
+)
+from libs.observability.tracing import configure_tracing
 from libs.security.http import SecurityMiddleware
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -158,14 +168,61 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10, command_timeout=5)
     app.state.pool = pool
     app.state.provisioning_key = os.environ.get("LEDGER_PROVISIONING_KEY", "")
+    interval = float(os.environ.get("LEDGER_VERIFY_INTERVAL_SECONDS", "60"))
+
+    async def verifier() -> None:
+        while True:
+            try:
+                await run_integrity_check(pool)
+            except (asyncpg.PostgresError, OSError):
+                LEDGER_INTEGRITY_OK.labels("verifier_available").set(0)
+            await asyncio.sleep(interval)
+
+    task = asyncio.create_task(verifier())
     try:
         yield
     finally:
+        task.cancel()
         await pool.close()
+
+
+@contextmanager
+def _measured(operation: str) -> Iterator[None]:
+    started = time.perf_counter()
+    try:
+        yield
+    except HTTPException as exc:
+        LEDGER_POSTS.labels(operation, "rejected" if exc.status_code < 500 else "error").inc()
+        raise
+    except Exception:
+        LEDGER_POSTS.labels(operation, "error").inc()
+        raise
+    else:
+        LEDGER_POSTS.labels(operation, "ok").inc()
+    finally:
+        LEDGER_POST_LATENCY.labels(operation).observe(time.perf_counter() - started)
+
+
+async def run_integrity_check(pool: asyncpg.Pool) -> bool:
+    """Recompute invariants from immutable postings and publish them for alerting."""
+    rows = await pool.fetch("SELECT check_name, ok FROM ledger_verify_integrity()")
+    totals = await pool.fetchrow(
+        "SELECT sum(debit_minor) = sum(credit_minor) AS ok FROM ledger_trial_balance()"
+    )
+    LEDGER_INTEGRITY_RUNS.inc()
+    all_ok = True
+    for row in rows:
+        LEDGER_INTEGRITY_OK.labels(row["check_name"]).set(1 if row["ok"] else 0)
+        all_ok = all_ok and bool(row["ok"])
+    balanced = bool(totals is not None and totals["ok"] is not False)
+    LEDGER_INTEGRITY_OK.labels("trial_balance").set(1 if balanced else 0)
+    return all_ok and balanced
 
 
 app = FastAPI(title="Tally Ledger", version="1.0.0", lifespan=lifespan)
 app.add_middleware(SecurityMiddleware, max_body_bytes=256_000)
+instrument(app, "ledger")
+configure_tracing("ledger", app)
 
 
 def _pool(request: Request) -> asyncpg.Pool:
@@ -247,6 +304,11 @@ async def provision_merchant_account(
 
 @app.post("/v1/entries", response_model=PostingResponse, status_code=status.HTTP_201_CREATED)
 async def post_entry(body: PostEntryRequest, request: Request) -> PostingResponse:
+    with _measured("post_entry"):
+        return await _post_entry(body, request)
+
+
+async def _post_entry(body: PostEntryRequest, request: Request) -> PostingResponse:
     payload = _posting_payload(body)
     try:
         async with _pool(request).acquire() as connection:
@@ -263,6 +325,11 @@ async def post_entry(body: PostEntryRequest, request: Request) -> PostingRespons
 
 @app.post("/v1/holds", response_model=HoldResponse, status_code=status.HTTP_201_CREATED)
 async def place_hold(body: PlaceHoldRequest, request: Request) -> HoldResponse:
+    with _measured("place_hold"):
+        return await _place_hold(body, request)
+
+
+async def _place_hold(body: PlaceHoldRequest, request: Request) -> HoldResponse:
     payload = _posting_payload(body)
     try:
         async with _pool(request).acquire() as connection:
@@ -437,6 +504,7 @@ async def get_balance(
 @app.get("/v1/integrity", response_model=list[IntegrityCheck])
 async def verify_integrity(request: Request) -> list[IntegrityCheck]:
     try:
+        await run_integrity_check(_pool(request))
         rows = await _pool(request).fetch(
             "SELECT check_name, ok, detail FROM ledger_verify_integrity()"
         )

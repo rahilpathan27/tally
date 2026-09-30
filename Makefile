@@ -1,4 +1,4 @@
-.PHONY: dev web web-check e2e backoffice-api train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: observability-up observability-down dashboards alert-rules-test alert-drill dev web web-check e2e backoffice-api train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
 CHAOS_FLOW_SCENARIOS ?= 2000
@@ -117,6 +117,21 @@ web-check:
 
 e2e:
 	cd web/console && CI=1 npx playwright test
+
+observability-up:
+	docker compose -f infra/observability/docker-compose.yml up -d
+
+observability-down:
+	docker compose -f infra/observability/docker-compose.yml down
+
+dashboards:
+	uv run python -m scripts.build_dashboards
+
+alert-rules-test:
+	docker run --rm -v "$(PWD)/infra/observability/prometheus/rules:/rules" --entrypoint promtool prom/prometheus:v3.5.0 test rules /rules/tally-alerts.test.yml
+
+alert-drill:
+	uv run python -m scripts.alert_drill
 
 simulate loadtest demo deploy-dev destroy-dev:
 	@echo "$@ is not available yet. See docs/PROGRESS.md for implementation status."

@@ -14,6 +14,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from libs.observability.metrics import instrument
+from libs.observability.tracing import configure_tracing
 from libs.security.http import SecurityMiddleware
 from libs.security.jwt_tokens import KeyRing
 from libs.security.key_encryption import ApiKeyCipher
@@ -108,6 +110,8 @@ def create_app(allowed_origins: tuple[str, ...] = ()) -> FastAPI:
         allow_headers=["content-type", "x-csrf-token"],
     )
     app.add_middleware(SecurityMiddleware, max_body_bytes=2_000_000)
+    instrument(app, "backoffice")
+    configure_tracing("backoffice", app)
 
     @app.exception_handler(ApprovalError)
     async def approval_error(request: Request, exc: ApprovalError) -> JSONResponse:

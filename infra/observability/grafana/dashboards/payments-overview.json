@@ -1,0 +1,202 @@
+{
+  "uid": "tally-payments-overview",
+  "title": "Payments Overview",
+  "tags": [
+    "tally"
+  ],
+  "timezone": "Asia/Kolkata",
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Transitions / s by state",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (to_state) (rate(tally_payment_transitions_total[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Payments in state",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tally_payments_in_state",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Success ratio (5m)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(tally_payment_transitions_total{to_state=\"succeeded\"}[5m])) / sum(rate(tally_payment_transitions_total{to_state=~\"succeeded|failed|reversed\"}[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Merchant API p99 latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(tally_http_request_duration_seconds_bucket{service=\"core\",route=~\"/v1/.*\"}[5m])))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Merchant API 5xx ratio",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(tally_http_requests_total{service=\"core\",route=~\"/v1/.*\",status=~\"5..\"}[5m])) / sum(rate(tally_http_requests_total{service=\"core\",route=~\"/v1/.*\"}[5m]))",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 6,
+      "title": "Idempotent replays / s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(tally_idempotency_replays_total[5m])",
+          "datasource": {
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {}
+    }
+  ]
+}

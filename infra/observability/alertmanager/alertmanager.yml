@@ -1,0 +1,13 @@
+# Local routing: pages and tickets are separated; receivers are placeholders (no paging locally).
+route:
+  receiver: tickets
+  group_by: [alertname, bank, check]
+  group_wait: 10s
+  repeat_interval: 1h
+  routes:
+    - matchers: [severity="page"]
+      receiver: pager
+      repeat_interval: 15m
+receivers:
+  - name: pager
+  - name: tickets

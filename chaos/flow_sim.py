@@ -198,8 +198,13 @@ class FlowChaos:
         self.stack.bank_transport.faults.clear()
         self.stack.network_transport.faults.clear()
         # Healing models the outage ending and the breaker's reset period elapsing.
-        self.core.bank_breaker.record_success()
-        self.core.card_network_breaker.record_success()
+        for name in (
+            "bank_breaker",
+            "card_network_breaker",
+            "bank_status_breaker",
+            "card_network_status_breaker",
+        ):
+            getattr(self.core, name).record_success()
         if scenario.method == "card":
             config = self.network.config
             self.network.config = CardNetworkConfig(
@@ -270,9 +275,9 @@ class FlowChaos:
                 self.core.payment_repository,
                 self.core.bank_http,
                 self.core.ledger_http,
-                self.core.bank_breaker,
+                self.core.bank_status_breaker,
                 network_http=self.core.card_network_http,
-                network_breaker=self.core.card_network_breaker,
+                network_breaker=self.core.card_network_status_breaker,
                 faults=self.core,
             )
         except BaseException as exc:  # noqa: BLE001
@@ -285,8 +290,13 @@ class FlowChaos:
         stack = self.stack
         self._configure(scenario)
         # Breakers are process-local; a fresh process after a crash starts with them closed.
-        self.core.bank_breaker.record_success()
-        self.core.card_network_breaker.record_success()
+        for name in (
+            "bank_breaker",
+            "card_network_breaker",
+            "bank_status_breaker",
+            "card_network_status_breaker",
+        ):
+            getattr(self.core, name).record_success()
         body: dict[str, object] = {
             "amount_minor": scenario.amount,
             "currency": "INR",
