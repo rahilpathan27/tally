@@ -280,9 +280,10 @@ def test_card_and_upi_happy_paths_and_illegal_transition_are_audited() -> None:
                     )
                     == 1
                 )
-                assert await ledger_pool.fetchval(
-                    "SELECT bool_and(ok) FROM ledger_verify_integrity()"
-                ) is True
+                assert (
+                    await ledger_pool.fetchval("SELECT bool_and(ok) FROM ledger_verify_integrity()")
+                    is True
+                )
             finally:
                 await client.aclose()
                 await core_app.state.ledger_http.aclose()

@@ -14,7 +14,7 @@ The journal and postings reject `UPDATE` and `DELETE` through triggers, and dire
 
 ## Cross-service state
 
-The gateway now has a partial authentication and persistence foundation, but it is not yet wired to merchant payment routes. HMAC verification binds method, raw path/query, body digest, timestamp, and nonce. Once a key is found and its ciphertext is decrypted by the configured provider, successful signatures consume `(key_id, nonce)` in PostgreSQL; concurrent reuse is rejected by the primary key. The Redis rate limiter uses atomic fixed-window counters, not a rolling-window algorithm. Idempotency records are merchant-keyed and RLS-scoped; final-response replay is available through the store API. These controls are not yet an end-to-end merchant API guarantee because no public gateway route composes them.
+The merchant payment API uses the Phase 3 gateway route wrapper. HMAC verification binds method, raw path/query, body digest, timestamp, and nonce. Once a key is found and its ciphertext is decrypted by the configured provider, successful signatures consume `(key_id, nonce)` in PostgreSQL; concurrent reuse is rejected by the primary key. The Redis rate limiter uses atomic fixed-window counters, not a rolling-window algorithm. Idempotency records are merchant-keyed and RLS-scoped, and mutation routes replay completed JSON responses. These controls apply to payment intent create/confirm/capture/cancel routes; they are not yet a guarantee for payment operations that do not exist.
 
 RLS policies read transaction-local `app.merchant_id`, which the application sets from its authenticated principal. This is defense-in-depth against accidentally unscoped queries; the shared application database role can set custom PostgreSQL variables, so it is not a boundary against a compromised service or arbitrary SQL execution. Local API key ciphertext uses AES-GCM with a separately supplied 32-byte master key and key ID as authenticated associated data; this is local simulation encryption, not envelope encryption or managed KMS. Key provisioning/rotation endpoints and scheduled expired-record cleanup are also outstanding; a bounded cleanup function and manual `make gateway-cleanup` command exist.
 
@@ -24,8 +24,25 @@ The local vault accepts only PANs configured on its published-test allowlist tha
 
 This is a local simulation boundary. A static shared credential stands in for simulator mTLS, and the local KEK stands in for managed KMS. Compose networking and process-local access controls are not a production network security claim. Do not use real PAN or CVV.
 
-There is still no payment orchestrator, outbox, or recovery worker. No guarantee is claimed for crash windows between payment state and a ledger call. Those require later phases and failure-injection verification.
+The Phase 5 orchestrator and transactional outbox are implemented, but no recovery worker exists yet. Crash windows are described below and require the Phase 6 recovery and failure-matrix work.
+
+## Payment orchestration (Phase 5)
+
+The payment API authenticates merchant mutations through the Phase 3 HMAC route controls. Payment intents store amount in integer minor units, currency, opaque card tokens or UPI VPAs, and their current state. A separate immutable transition row records both accepted changes and rejected attempts. In one PostgreSQL transaction, an accepted state change updates the current-state projection, appends transition history and an outbox event, and persists any required ledger command. The API never edits ledger balances.
+
+The verified card flow is `created → authorizing → authorized → capturing → succeeded`; authorization places a ledger hold, capture posts it, and cancellation voids an authorized hold. The verified UPI flow resolves registered payer/payee VPAs, receives payer PSP approval, obtains approval from both simulated banks, then submits a deterministic ledger posting. The simulators support decline, timeout, and outage controls; bank and PSP messages carry deterministic idempotency keys. State transition logs and outbox payloads contain no PAN. The core hashes caller-supplied request IDs before storing them.
+
+| External result | Current Phase 5 behavior | Ledger effect |
+| --- | --- | --- |
+| Card network approves | `authorized`; merchant may capture or cancel | Place hold, then post on capture or void on cancel |
+| Card network declines | `failed` | No hold |
+| UPI payer PSP declines | `failed` | No posting |
+| Either UPI bank declines | `failed` | No posting |
+| Both UPI banks approve | `succeeded` | One idempotent transfer posting |
+| Simulator or ledger request times out / returns an error | Payment remains at its last persisted in-flight state with a pending command | A deterministic ledger key permits replay; no worker resolves the command yet |
+
+There is no distributed transaction across the general database, ledger, vault, or simulators. The durable command is written before an external ledger call. If the process stops after the ledger commits but before the core stores the response, the deterministic ledger key or immutable hold ID allows the request to be replayed without creating another entry. If a bank or PSP response is lost, the current service does not check transaction status; recovery and deemed outcomes are Phase 6. Simulator idempotency caches are in memory and do not survive simulator restarts. Outbox events remain stored but are not yet published to Redpanda.
 
 ## Verification
 
-The versioned ledger, gateway, and vault migrations and their PostgreSQL integration assertions pass against the local PostgreSQL 16 Compose services. Redis rate-limit integration, vault tokenization/access tests, Python quality checks, and the available test suite pass. No throughput, crash-recovery, chaos, or end-to-end payment claim is made.
+The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. The full Python quality checks, unit suite, OpenAPI drift checks, ledger integrity verifier, card capture/void flows, and UPI happy path pass. No throughput, unknown-outcome recovery, chaos, or production payment claim is made.

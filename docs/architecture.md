@@ -23,11 +23,13 @@ flowchart LR
   Core --> Redis[(Redis)]
 ```
 
-This is the target topology. The ledger service and its local API are implemented and independently stored in PostgreSQL. The other application boxes remain target components and are not implemented yet.
+The local payment API, ledger API, vault API, and configurable bank, payer PSP, and card-network simulators are implemented. Payments use card tokens or the simplified UPI flow; the core persists state transitions, ledger commands, and outbox events. Risk, recon, backoffice, web apps, webhook dispatch, and analytics workers remain target components.
 
 ## Service boundaries
 
-The intended design keeps the ledger and vault as separately permissioned services and databases. The core coordinates workflows and persists state but never edits ledger balances. It submits deterministic, idempotent posting requests to the ledger. This modular-core boundary keeps payment state transitions close together while preserving independent security and consistency boundaries for money and card tokens.
+The ledger and vault have separate databases. The core coordinates workflows and persists payment state but never edits ledger balances. It creates deterministic merchant liability accounts through the ledger API and submits idempotent holds or postings. A state transition, immutable transition-log row, outbox event, and any required ledger command are stored in one general-database transaction. External calls happen after that transaction; Phase 6 will add a worker to resume and resolve pending commands.
+
+UPI VPA routing in this local version reads the bank ID registered for each VPA. Messages and responses are simplified examples of publicly documented UPI concepts; they are not the NPCI protocol or its message formats.
 
 ## Local dependencies
 

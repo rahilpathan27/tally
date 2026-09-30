@@ -11,15 +11,17 @@
 - Phase 2 quality gates: AST float-ban, mutation-score gate, and CI checks for lint/type checks, tests, mutation testing, and OpenAPI drift.
 - Phase 3 gateway controls: HMAC-SHA256 route authentication validates method/raw-path/query/body-digest/timestamp/nonce, resolves active encrypted merchant keys, enforces scopes, and consumes nonces once. `GatewayRoute` composes auth, per-merchant rate-limit policy, required mutation idempotency keys, request fingerprinting, cached JSON response replay, and safe in-progress responses. PostgreSQL stores merchant keys/idempotency results with tenant RLS, a restricted key lookup function, bounded cleanup, and append-only hash-chained audit events. A CLI creates, atomically rotates, and revokes keys.
 - Phase 4 vault: a dedicated internal-network PostgreSQL database stores envelope-encrypted, explicitly allowlisted published test PANs and only non-sensitive display metadata. The local API returns opaque tokens, refuses CVV/unknown fields with scrubbed validation errors, hashes caller request IDs before audit storage, and only permits detokenization to the network-simulator identity using a separate local credential. Access is hash-chain audited and append-only.
-- Added ADR-001 money, ADR-002 ledger locking, ADR-003 local object store, ledger design, and guarantees documentation.
+- Phase 5 payment orchestrator: signed, scoped merchant routes create, retrieve, confirm, capture, and cancel payment intents. The table-driven state machine records accepted and rejected transitions in append-only history. Each accepted state change writes its outbox event and any deterministic ledger command in the same transaction. Card-token authorization goes through the network simulator and vault, then uses a ledger hold for capture/void. UPI VPA resolution selects the registered bank IDs, and payer PSP/bank simulator responses lead to one deterministic ledger posting.
+- Phase 5 simulators: separate loopback APIs provide configurable card-network, payer PSP, and multi-bank outcomes. Bank messages and PSP approvals replay by idempotency key within the running simulator process. The message shapes are simplified, local examples, not NPCI protocol messages.
+- Added ADRs 001–009 covering money, ledger locking and reservations, local object storage, tokenization, and payment orchestration, alongside ledger design and guarantees documentation.
 
 ## Verified
 
 - `docker compose up -d --wait` succeeds. All dependency containers report healthy; published ports bind to loopback.
-- `make ledger-migrate` and `make ledger-test-integration` pass on the local versioned ledger database; rerunning migration is idempotent.
+- `make ledger-migrate` applies ledger schema versions 1 and 2 idempotently. Version 2 corrects hold reservation checks so each outgoing hold is validated against the account's available balance without offsetting it by another pending incoming hold. `make ledger-test-integration` passes against the local database.
 - PostgreSQL integration assertions cover same-key replay, changed-payload rejection, unbalanced entry rejection, insufficient funds, closed accounts, cross-currency entries, holds, hold post/void, integrity verification, and app-role direct-write denial.
 - `make lint` passes Ruff lint/format, strict mypy for libraries/services/tests, and the float-ban scan.
-- `make test` passes: 66 tests (6 database/Redis integration tests skip in the default no-environment run). Dedicated gateway and vault integration Make targets run those checks against the local services.
+- `make test` passes: 77 tests (7 database/Redis integration tests skip in the default no-environment run). Dedicated ledger, gateway, vault, and core integration targets pass against the local services.
 - OpenAPI export/check passes, and mutation testing passes its configured 70% minimum (76.0% in the last full run).
 - HMAC primitive tests cover valid requests, method/path/body tampering, unknown keys, stale timestamps, and minimum secret length. The dependency integration test covers encrypted key lookup, valid request authentication, scope enforcement, tamper rejection, and duplicate nonce rejection. Latest lint, type, float-ban, full test, and OpenAPI checks pass.
 - `make gateway-migrate` applies gateway schema versions 1 through 4; it is repeatable.
@@ -27,15 +29,20 @@
 - Ledger API smoke checks against the Documents project root verified readiness, repeated hold-post replay (same entry ID and idempotency key), and all three integrity checks.
 - `make vault-migrate` and `make vault-test-integration` pass. Integration coverage checks database role restrictions, audit-chain verification and mutation rejection, tokenization response/log scrubbing, ciphertext storage, CVV rejection, detokenization authorization, and Compose network isolation.
 - Vault unit tests cover envelope encryption round-trip, fresh-key ciphertext variance, context binding, tamper rejection, test-PAN allowlisting/Luhn/expiry, and supported published card test numbers.
+- `make core-test-integration` passes an end-to-end card token → authorization hold → capture path and UPI VPA → payer PSP → two-bank approval → ledger posting path. It verifies command/outbox persistence, ledger integrity, repeated merchant idempotency replay, cancellation/hold void, PAN-free correlation IDs, and rejection logging for an illegal transition.
+- Payment state-machine tests cover allowed and illegal edges; simulator tests cover bank decline, timeout and outage modes, payer decline, card-network outage, and idempotent bank replay/conflict.
+- `make openapi` exports both the ledger and merchant payment API contracts; both drift checks pass.
 
 ## Known gaps
 
 - The local FastAPI ledger API connects using the Compose superuser, binds to loopback, and has no network authentication; the app role remains a database role template rather than the API's runtime identity.
-- Merchant resource endpoints are not implemented yet; Phase 5 will add payment routes to the Phase 3 `GatewayRoute` controls. Gateway keys use local AES-GCM with a separately managed 32-byte key, not production KMS. Expired rows can be cleaned with `make gateway-cleanup`, but no scheduled cleanup worker exists. The internal ledger API remains separate, loopback-only, and connected using the Compose superuser.
+- Phase 6 remains: status checks, pending-unknown policy, recovery worker, late-success correction/reversal, exponential backoff, circuit breakers, health-based bank routing, and a complete failure matrix. A simulator timeout currently leaves the durable payment command pending and the payment authorizing; no worker resolves it yet.
+- The outbox is transactionally persisted but has no Redpanda publisher/dispatcher. Simulator idempotency result caches are process-local and are lost on restart. Core and ledger local apps use the Compose database superuser; merchant VPA ownership, payment limits/velocity checks, and live rails are not implemented.
+- Gateway keys use local AES-GCM with a separately managed 32-byte key, not production KMS. Expired rows can be cleaned with `make gateway-cleanup`, but no scheduled cleanup worker exists. The internal ledger API remains separate and loopback-only.
 - Vault encryption currently uses a locally supplied AES-GCM KEK, and simulator identity uses a local shared credential rather than mTLS. No production KMS, certificate identity, key lifecycle, external audit anchoring, or real card-data support is implemented.
 - Snapshot tables exist and the Python model can snapshot/as-of, but there is no scheduled PostgreSQL snapshot writer, DB as-of query, or independent verifier worker.
 - No ledger throughput/latency benchmark has been measured. The global chain-head lock serializes database writes.
-- Later phases remain unimplemented: orchestrator/simulators beyond the vault's detokenization boundary, recovery/chaos harness, refunds/settlements/webhooks, reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports.
+- Later phases remain unimplemented: recovery/chaos harness, refunds/settlements/webhooks, reconciliation, risk, security/compliance workflows, frontend, observability, cloud deployment, and end-to-end demos/reports.
 - SeaweedFS is an S3-compatible local substitution for the inaccessible pinned MinIO image. Its S3 endpoint is unauthenticated and loopback-only; it does not provide production Object Lock guarantees.
 - GitHub Actions has not run on a hosted runner. Only the same local lint/type/test commands were run.
 

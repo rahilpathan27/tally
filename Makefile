@@ -29,6 +29,9 @@ ledger-migrate:
 	@version=$$(docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -tAc "SELECT version FROM ledger_schema_migrations WHERE version = 1" 2>/dev/null || true); \
 	if [ "$$version" = "1" ]; then echo "Ledger schema version 1 is already applied"; \
 	else docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < services/ledger/migrations/0001_initial.sql; fi
+	@version=$$(docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -tAc "SELECT version FROM ledger_schema_migrations WHERE version = 2" 2>/dev/null || true); \
+	if [ "$$version" = "2" ]; then echo "Ledger schema version 2 is already applied"; \
+	else docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < services/ledger/migrations/0002_hold_reservation_per_account.sql; fi
 
 ledger-test-integration: ledger-migrate
 	docker compose exec -T postgres-ledger psql -U tally -d $(LEDGER_DB) -v ON_ERROR_STOP=1 < tests/integration/ledger_posting.sql
@@ -72,7 +75,7 @@ core-test-integration: core-migrate gateway-migrate vault-migrate seed
 	REDIS_URL=redis://127.0.0.1:6379/0 TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally VAULT_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55434/tally_vault LEDGER_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55433/tally_ledger_v1 uv run pytest tests/integration/test_payment_flow.py
 
 core-api:
-	TALLY_LEDGER_INTERNAL_KEY=tally-local-ledger-provisioner uv run uvicorn services.core.api:app --host 127.0.0.1 --port 8000
+	TALLY_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55432/tally REDIS_URL=redis://127.0.0.1:6379/0 TALLY_LEDGER_INTERNAL_KEY=tally-local-ledger-provisioner uv run uvicorn services.core.api:app --host 127.0.0.1 --port 8000
 
 bank-sim:
 	uv run uvicorn services.simulators.bank.api:app --host 127.0.0.1 --port 8010

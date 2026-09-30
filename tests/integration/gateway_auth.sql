@@ -71,8 +71,14 @@ BEGIN
     ) VALUES ('integration-merchant-a', 'expired-order', fp, 'in_progress',
               clock_timestamp() - interval '1 second');
     SELECT * INTO result FROM gateway_cleanup_expired_state(10);
-    IF result.nonces_deleted <> 1 OR result.idempotency_deleted <> 1 THEN
+    -- Previous runs may leave other expired nonces in this shared test DB.
+    -- The cleanup is bounded, so assert it removed at least this fixture.
+    IF result.nonces_deleted < 1 OR result.idempotency_deleted < 1 THEN
         RAISE EXCEPTION 'expired state was not cleaned up';
+    END IF;
+    IF EXISTS (SELECT FROM gateway_request_nonces WHERE nonce = 'expired-nonce-00001')
+       OR EXISTS (SELECT FROM gateway_idempotency_requests WHERE idempotency_key = 'expired-order') THEN
+        RAISE EXCEPTION 'expired fixture state remains after cleanup';
     END IF;
 
     BEGIN
