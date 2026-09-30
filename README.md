@@ -4,7 +4,7 @@ Tally is a local simulation of a ledger-backed payments platform. It does not mo
 
 ## Status
 
-The Phase 1 local dependency stack and Phase 2 money/ledger foundation are implemented. Phase 3 gateway authentication and idempotency storage are in progress. Payment orchestration, reconciliation, risk, web interfaces, chaos demos, cloud deployment, and later-phase features are not implemented yet. See [docs/PROGRESS.md](docs/PROGRESS.md) for verified status and gaps.
+Phases 1–4 from Section 17 of the master build prompt are implemented and locally verified: foundation, money/ledger, gateway controls, and the isolated test-card vault. Payment orchestration, reconciliation, risk, web interfaces, chaos demos, cloud deployment, and later-phase features are not implemented yet. See [docs/PROGRESS.md](docs/PROGRESS.md) for verified status and gaps.
 
 ## Local foundation
 
@@ -18,6 +18,8 @@ make lint
 make test
 make mutation
 make gateway-test-integration
+make vault-migrate
+make vault-test-integration
 ```
 
 The local gateway key CLI creates a merchant and prints the generated secret once. Set `TALLY_DATABASE_URL` to the general PostgreSQL database and `TALLY_API_KEY_ENCRYPTION_KEY` to a separately managed base64-encoded 32-byte key before use:
@@ -36,7 +38,7 @@ Run the internal ledger HTTP service in its own terminal with `make ledger-api`.
 
 All published ports bind to loopback. PostgreSQL host ports are 55432 (general), 55433 (ledger), and 55434 (vault). The SeaweedFS S3 endpoint is `http://127.0.0.1:8333` and is unauthenticated in this local simulation. Ledger integration checks run after schema migration.
 
-The ledger API runs on `http://127.0.0.1:8001` via `make ledger-api`. It is an internal development interface with no network authentication yet; keep it on loopback. Its generated OpenAPI contract is at [contracts/openapi/ledger-v1.json](contracts/openapi/ledger-v1.json).
+The ledger API runs on `http://127.0.0.1:8001` via `make ledger-api`. It is an internal development interface with no network authentication yet; keep it on loopback. The vault API runs on `http://127.0.0.1:8002` via `make vault-api`; set `VAULT_DATABASE_URL`, base64 `TALLY_VAULT_KEK_B64`, `TALLY_VAULT_TEST_PANS`, `TALLY_VAULT_TOKENIZE_KEY`, and `TALLY_VAULT_NETWORK_KEY` first. The API accepts only configured published test PANs. Vault detokenization uses a local shared credential; production mTLS and managed KMS are not implemented. The ledger's generated OpenAPI contract is at [contracts/openapi/ledger-v1.json](contracts/openapi/ledger-v1.json).
 
 ## Repository guide
 

@@ -18,8 +18,14 @@ The gateway now has a partial authentication and persistence foundation, but it 
 
 RLS policies read transaction-local `app.merchant_id`, which the application sets from its authenticated principal. This is defense-in-depth against accidentally unscoped queries; the shared application database role can set custom PostgreSQL variables, so it is not a boundary against a compromised service or arbitrary SQL execution. Local API key ciphertext uses AES-GCM with a separately supplied 32-byte master key and key ID as authenticated associated data; this is local simulation encryption, not envelope encryption or managed KMS. Key provisioning/rotation endpoints and scheduled expired-record cleanup are also outstanding; a bounded cleanup function and manual `make gateway-cleanup` command exist.
 
+## Card vault
+
+The local vault accepts only PANs configured on its published-test allowlist that pass Luhn and expiry checks. Each PAN is AES-GCM encrypted under a fresh random data key, and that key is wrapped by a separately configured local KEK. The token is authenticated context for both layers. The database contains ciphertext and BIN/last4/expiry metadata; tokenization responses and validation errors do not echo PAN or CVV, and the API rejects CVV fields. A database audit function restricts detokenization to `network-simulator` and appends hash-chained immutable events. Tests verify these properties and that the vault database is attached only to an internal Compose network with a loopback-only published port.
+
+This is a local simulation boundary. A static shared credential stands in for simulator mTLS, and the local KEK stands in for managed KMS. Compose networking and process-local access controls are not a production network security claim. Do not use real PAN or CVV.
+
 There is still no payment orchestrator, outbox, or recovery worker. No guarantee is claimed for crash windows between payment state and a ledger call. Those require later phases and failure-injection verification.
 
 ## Verification
 
-The versioned ledger and gateway migrations and their PostgreSQL integration assertions pass against the local PostgreSQL 16 Compose services. Redis rate-limit integration, Python quality checks, and the available test suite pass. No throughput, crash-recovery, chaos, or end-to-end payment claim is made.
+The versioned ledger, gateway, and vault migrations and their PostgreSQL integration assertions pass against the local PostgreSQL 16 Compose services. Redis rate-limit integration, vault tokenization/access tests, Python quality checks, and the available test suite pass. No throughput, crash-recovery, chaos, or end-to-end payment claim is made.

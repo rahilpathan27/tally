@@ -1,4 +1,4 @@
-.PHONY: up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
 
@@ -52,6 +52,18 @@ gateway-test-integration: gateway-migrate
 
 gateway-cleanup:
 	docker compose exec -T postgres-general psql -U tally -d tally -v ON_ERROR_STOP=1 -c "SELECT * FROM gateway_cleanup_expired_state(10000)"
+
+vault-migrate:
+	@version=$$(docker compose exec -T postgres-vault psql -U tally -d tally_vault -tAc "SELECT version FROM vault_schema_migrations WHERE version = 1" 2>/dev/null || true); \
+	if [ "$$version" = "1" ]; then echo "Vault schema version 1 is already applied"; \
+	else docker compose exec -T postgres-vault psql -U tally -d tally_vault -v ON_ERROR_STOP=1 < services/vault/migrations/0001_vault.sql; fi
+
+vault-test-integration: vault-migrate
+	docker compose exec -T postgres-vault psql -U tally -d tally_vault -v ON_ERROR_STOP=1 < tests/integration/vault_access.sql
+	VAULT_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55434/tally_vault uv run pytest tests/integration/test_vault_api.py tests/integration/test_vault_network.py
+
+vault-api:
+	uv run uvicorn services.vault.api:app --host 127.0.0.1 --port 8002
 
 ledger-api:
 	LEDGER_DATABASE_URL=postgresql://tally:tally-local-only@127.0.0.1:55433/$(LEDGER_DB) uv run uvicorn services.ledger.api:app --host 127.0.0.1 --port 8001
