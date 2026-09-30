@@ -16,6 +16,7 @@ from uuid import uuid4
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from libs.security.envelope_encryption import EnvelopeCipher
 from libs.security.http import SecurityMiddleware
@@ -32,6 +33,8 @@ class VaultConfig:
     allowed_test_pans: frozenset[str]
     tokenize_client_key: str
     network_simulator_key: str
+    # Publishable keys identify a checkout page; they are not secrets (like Stripe's pk_*).
+    publishable_keys: frozenset[str] = frozenset()
 
     @classmethod
     def from_environment(cls) -> VaultConfig:
@@ -53,7 +56,12 @@ class VaultConfig:
             raise RuntimeError(
                 "TALLY_VAULT_TEST_PANS contains a PAN outside the published test set"
             )
-        return cls(database_url, kek, allowed, tokenize_key, network_key)
+        publishable = frozenset(
+            key.strip()
+            for key in os.environ.get("TALLY_VAULT_PUBLISHABLE_KEYS", "").split(",")
+            if key.strip()
+        )
+        return cls(database_url, kek, allowed, tokenize_key, network_key, publishable)
 
 
 class TokenizeRequest(BaseModel):
@@ -120,6 +128,14 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Tally Vault", version="1.0.0", lifespan=lifespan)
     app.add_middleware(SecurityMiddleware, max_body_bytes=16_000)
+    origins = [o for o in os.environ.get("TALLY_VAULT_CORS_ORIGINS", "").split(",") if o]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["POST"],
+            allow_headers=["content-type", "x-publishable-key"],
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
@@ -155,6 +171,25 @@ def create_app() -> FastAPI:
     ) -> TokenizeResponse:
         config = _config(request)
         _authorize(x_vault_client_key, config.tokenize_client_key, "Vault-Client")
+        return await _tokenize(body, request, config)
+
+    @app.post(
+        "/public/v1/tokens", response_model=TokenizeResponse, status_code=status.HTTP_201_CREATED
+    )
+    async def tokenize_from_checkout(
+        body: TokenizeRequest,
+        request: Request,
+        x_publishable_key: Annotated[str | None, Header()] = None,
+    ) -> TokenizeResponse:
+        """Browser checkout posts the card straight here, so the PAN never reaches the merchant."""
+        config = _config(request)
+        if x_publishable_key is None or x_publishable_key not in config.publishable_keys:
+            _authorize(None, "", "Vault-Publishable")
+        return await _tokenize(body, request, config)
+
+    async def _tokenize(
+        body: TokenizeRequest, request: Request, config: VaultConfig
+    ) -> TokenizeResponse:
         pan = body.pan.get_secret_value()
         try:
             validate_test_card(

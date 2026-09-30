@@ -53,6 +53,8 @@
 
 - Phase 11 verification: `tests/security/` passes — an authorization matrix over every BFF route × seven roles (plus unauthenticated), tenant-isolation attacks through the API and directly in SQL, auth flows (lockout, MFA replay, refresh-token reuse revoking the family, CSRF), maker-checker bypass attempts (self-approval, wrong role, double approval), AML idempotency, audit-chain tamper detection against anchors, JWT attacks (`alg=none`, HS256 key confusion, unknown `kid`, expiry, audience), RFC 6238 vectors, log scrubbing, SSRF, and races (capture/cancel, confirm storm, 200 opposite-direction ledger postings with no deadlock). The suite found and fixed: refresh-token reuse revocation being rolled back with the error, a simulator model FastAPI could not resolve, a chaos route that hid simulator failures, and SQL typing errors in AML.
 
+- Phase 12 (in progress, not verified): `scripts/dev_stack.py` serves the real services on ports 8000/8002/8030/8040 with fresh databases and seeded demo data (merchant, console users, payments, refunds, settlement, dispute, risk reviews, recon breaks); verified by BFF login and RLS-scoped payment listing. The vault gained a publishable-key `/public/v1/tokens` route with CORS for browser checkout. A Next.js 16 app is scaffolded in `web/console`; no screens, Playwright tests or accessibility checks exist yet.
+
 ## Known gaps
 
 - The local FastAPI ledger API connects using the Compose superuser, binds to loopback, and has no network authentication; the app role remains a database role template rather than the API's runtime identity.

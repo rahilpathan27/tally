@@ -48,6 +48,7 @@ SIMULATOR_KEY = "stack-network-simulator-key"
 TOKENIZE_KEY = "stack-tokenize-client-key"
 VAULT_NETWORK_KEY = "stack-vault-network-key"
 MERCHANT_SECRET = b"stack-merchant-hmac-secret-with-more-than-32-bytes"
+PUBLISHABLE_KEY = "pk_test_tally_demo"
 
 FaultMode = Literal["drop_request", "lose_response"]
 
@@ -173,6 +174,8 @@ async def build_stack(
     trusted_webhook_hosts: tuple[str, ...] = (),
     risk: bool = False,
     model_dir: str = "ml/artifacts/fraud-gbm-v1",
+    key_id: str | None = None,
+    merchant_name: str = "Local stack merchant",
 ) -> LocalStack:
     general_pool = await asyncpg.create_pool(general_url, min_size=2, max_size=20)
     ledger_pool = await asyncpg.create_pool(ledger_url, min_size=2, max_size=20)
@@ -183,12 +186,17 @@ async def build_stack(
     vault_pool = await asyncpg.create_pool(vault_url, min_size=1, max_size=5, setup=set_vault_role)
     redis = Redis.from_url(redis_url)
     merchant_id = merchant_id or f"stack-{uuid4().hex[:12]}"
-    key_id = f"key-{uuid4().hex}"
+    key_id = key_id or f"key-{uuid4().hex}"
     cipher = ApiKeyCipher(b"s" * 32)
 
     vault_app = create_vault_app()
     vault_app.state.vault_config = VaultConfig(
-        vault_url, b"v" * 32, frozenset({TEST_PAN}), TOKENIZE_KEY, VAULT_NETWORK_KEY
+        vault_url,
+        b"v" * 32,
+        frozenset({TEST_PAN, "5555555555554444", "378282246310005"}),
+        TOKENIZE_KEY,
+        VAULT_NETWORK_KEY,
+        frozenset({PUBLISHABLE_KEY}),
     )
     vault_app.state.vault_repository = VaultRepository(vault_pool, EnvelopeCipher(b"v" * 32))
     vault_http = httpx.AsyncClient(
@@ -281,7 +289,7 @@ async def build_stack(
         """INSERT INTO merchants(merchant_id, display_name) VALUES ($1, $2)
            ON CONFLICT (merchant_id) DO NOTHING""",
         merchant_id,
-        "Local stack merchant",
+        merchant_name,
     )
     await general_pool.execute(
         """INSERT INTO merchant_api_keys(
