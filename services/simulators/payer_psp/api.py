@@ -76,6 +76,13 @@ def create_app(config: PayerPspConfig | None = None) -> FastAPI:
             app.state.config.mode = mode
         return {"mode": app.state.config.mode}
 
+    @app.get("/internal/v1/modes")
+    async def get_mode(x_simulator_admin: str = Header(default="")) -> dict[str, str]:
+        expected = os.environ.get("TALLY_SIMULATOR_ADMIN_KEY", "")
+        if not expected or not hmac.compare_digest(expected, x_simulator_admin):
+            raise HTTPException(401, "simulator admin authentication failed")
+        return {"mode": app.state.config.mode}
+
     return app
 
 

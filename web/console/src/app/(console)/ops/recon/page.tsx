@@ -1,12 +1,17 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useState } from "react";
 import { z } from "zod";
-import { Card, Empty, ErrorNotice, Field, Loading, Money, PageHeader, Select, StatusBadge, Table, Td, when } from "@/components/ui";
+import { Button, Card, Empty, ErrorNotice, Field, Input, Loading, Money, PageHeader, Select, StatusBadge, Table, Td, when } from "@/components/ui";
 import { api } from "@/lib/api";
-import { ReconBreak, ReconRun } from "@/lib/schemas";
+import { AnyRecord, ReconBreak, ReconRun } from "@/lib/schemas";
+
+// Business dates are IST calendar days.
+function todayIst(): string {
+  return new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+}
 
 function age(iso: string): string {
   const hours = Math.floor((Date.now() - new Date(iso).getTime()) / 3_600_000);
@@ -16,6 +21,20 @@ function age(iso: string): string {
 export default function ReconWorkbench() {
   const [status, setStatus] = useState("open");
   const [type, setType] = useState("");
+  const [day, setDay] = useState(todayIst);
+  const queryClient = useQueryClient();
+  const action = useMutation({
+    mutationFn: (path: "files/fetch" | "runs") =>
+      api(`/bff/v1/ops/recon/${path}`, AnyRecord, {
+        method: "POST",
+        body: { source: "sponsor-bank", business_date: day },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["recon-breaks"] });
+    },
+  });
   const runs = useQuery({ queryKey: ["recon-runs"], queryFn: () => api("/bff/v1/ops/recon/runs?limit=10", z.array(ReconRun)) });
   const breaks = useQuery({
     queryKey: ["recon-breaks", status, type],
@@ -24,6 +43,16 @@ export default function ReconWorkbench() {
   return (
     <>
       <PageHeader title="Reconciliation" subtitle="Ledger nostro vs switch log vs bank statement" />
+      <Card title="Run reconciliation" className="mb-6">
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Business date (IST)">{(p) => <Input {...p} type="date" value={day} onChange={(e) => setDay(e.target.value)} />}</Field>
+          {/* Stands in for the bank's daily SFTP drop: pulls the simulator's statement for the date. */}
+          <Button type="button" busy={action.isPending && action.variables === "files/fetch"} onClick={() => action.mutate("files/fetch")}>Fetch bank statement</Button>
+          <Button type="button" busy={action.isPending && action.variables === "runs"} onClick={() => action.mutate("runs")}>Run reconciliation</Button>
+        </div>
+        {action.isError ? <div className="mt-3"><ErrorNotice error={action.error} /></div> : null}
+        {action.isSuccess ? <p role="status" className="mt-3 text-sm">{action.variables === "runs" ? "Reconciliation finished; see the runs and breaks below." : "Statement fetched. Fetching again replaces it."}</p> : null}
+      </Card>
       <Card title="Recent runs" className="mb-6">
         {runs.isPending ? <Loading /> : runs.isError ? <ErrorNotice error={runs.error} /> : runs.data.length === 0 ? <Empty>No runs yet.</Empty> : (
           <Table caption="Reconciliation runs" head={["Date", "Source", "Bank lines", "Matched", "Match rate", "Breaks", "Open value", "Finished"]}>

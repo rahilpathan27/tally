@@ -27,7 +27,8 @@ export default function MerchantOverview() {
           ["Captured volume", <Money key="v" minor={volume} />],
           ["Success rate", rate(succeeded, attempts)],
           ["Refunded", <Money key="r" minor={data.refunds.refunded_minor} />],
-          ["Confirm latency p50 / p95", `${Math.round(data.confirm_latency_ms.p50 ?? 0)} / ${Math.round(data.confirm_latency_ms.p95 ?? 0)} ms`],
+          // Creation to authorised/succeeded, including time spent in risk review or entering a code.
+          ["Time to complete p50 / p95", `${Math.round(data.confirm_latency_ms.p50 ?? 0)} / ${Math.round(data.confirm_latency_ms.p95 ?? 0)} ms`],
         ].map(([label, value]) => (
           <Card key={String(label)}>
             <p className="text-sm text-zinc-600 dark:text-zinc-400">{label}</p>

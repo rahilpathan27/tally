@@ -60,9 +60,10 @@ Log in as `ops@tally.test` (or `risk@`, `operator@` as needed).
 - **Switch monitor:** live success rate per bank (server-sent events).
 - **Chaos** (`operator@`): set `bank-a` to `http_500`, make a payment from the checkout, watch the
   breaker and the success rate react, then restore it.
-- **Risk** (`risk@`): the review queue shows reason codes from the model's SHAP values and the
-  rule that fired; approve or decline a case.
-- **Reconciliation:** a bank statement matched three ways (ledger, switch log, bank file); open a
+- **Risk** (`risk@`): pay ₹45,000 by UPI from `ravi@bank-c` (not `asha@bank-a`, which the demo
+  rules trust) to create a case. The review queue shows reason codes from the model's SHAP values
+  and the rule that fired; approve or decline it.
+- **Reconciliation:** fetch today's bank statement and run reconciliation; a statement is matched three ways (ledger, switch log, bank file); open a
   break, propose an adjustment, then approve it as `approver@` (the proposer cannot approve
   their own).
 - **Ledger explorer:** integrity checks, trial balance, a statement for one account.

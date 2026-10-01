@@ -9,6 +9,10 @@ import { formatMoney, parseMoneyInput } from "@/lib/money";
 const VAULT = process.env.NEXT_PUBLIC_VAULT_URL ?? "http://127.0.0.1:8002";
 const PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_TALLY_PUBLISHABLE_KEY ?? "pk_test_tally_demo";
 const PAYERS = ["asha@bank-a", "ravi@bank-c", "meera@bank-a", "payer@bank-a"];
+// The demo rule set allow-lists asha@bank-a (a known, trusted customer), so the risk engine
+// skips review and one-time codes for it; block rules still apply. Use another payer to see
+// risk holds and step-up.
+const PAYER_NOTES: Record<string, string> = { "asha@bank-a": " (trusted: skips risk review)" };
 
 type Result = { payment_id?: string; status?: string; next_action?: string | null; challenge_id?: string | null; reason_codes?: string[] | null; detail?: { code?: string; message?: string } };
 
@@ -123,7 +127,7 @@ export default function Checkout() {
         <Card title="Payment">
           <div className="flex flex-col gap-3" aria-live="polite">
             <p className="text-sm">Payment <span className="font-mono">{result.payment_id}</span></p>
-            <p className="text-lg" data-testid="checkout-status"><StatusBadge status={result.status ?? "unknown"} /></p>
+            <p className="text-lg" data-testid="checkout-status">{result.status === "risk_review" && result.next_action === "step_up" ? <span>Verification needed</span> : <StatusBadge status={result.status ?? "unknown"} />}</p>
             {result.status === "succeeded" ? <p role="status">Paid <Money minor={parsed.ok ? parsed.minor : 0} />. Thank you!</p> : null}
             {result.status === "failed" ? <p role="status">The payment was declined{result.reason_codes?.length ? ` (${result.reason_codes.join(", ")})` : ""}. You have not been charged.</p> : null}
             {result.status === "pending_unknown" ? <p role="status">Your bank has not confirmed yet. We are checking; do not pay again.</p> : null}
@@ -151,7 +155,7 @@ export default function Checkout() {
             </fieldset>
             {method === "upi" ? (
               <>
-                <Field label="Your UPI ID">{(p) => <Select {...p} value={vpa} onChange={(e) => setVpa(e.target.value)}>{PAYERS.map((v) => <option key={v}>{v}</option>)}</Select>}</Field>
+                <Field label="Your UPI ID">{(p) => <Select {...p} value={vpa} onChange={(e) => setVpa(e.target.value)}>{PAYERS.map((v) => <option key={v} value={v}>{v}{PAYER_NOTES[v] ?? ""}</option>)}</Select>}</Field>
                 {qrData ? <figure className="flex flex-col items-center gap-1">
                   {/* eslint-disable-next-line @next/next/no-img-element -- generated data URI, nothing to optimise */}
                   <img src={qrData} alt="UPI QR code for this payment" width={180} height={180} /><figcaption className="text-xs text-zinc-600">Or scan with a UPI app (simulated)</figcaption></figure> : null}

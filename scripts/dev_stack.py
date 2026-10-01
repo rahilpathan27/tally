@@ -309,6 +309,9 @@ async def main(args: argparse.Namespace) -> None:
     state = stack.core_app.state  # type: ignore[attr-defined]
     recon_ctx = ReconContext(stack.general_pool, state.ledger_http, store, ReconConfig())
     recon_app = create_recon_app(recon_ctx, internal_key="recon-key")
+    # The recon app runs in-process without its lifespan; give it the stack's bank client so
+    # "fetch statement from bank" in the console works.
+    recon_app.state.bank_http = state.bank_http
     bo = await build_backoffice(stack, recon_app=recon_app, chaos_enabled=True)
     bo.app.state.secure_cookies = args.secure_cookies
     summary = await seed(stack, bo, recon_ctx)

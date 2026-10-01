@@ -315,7 +315,16 @@ async def create_refund(
     )
     if response.status_code >= 400:
         raise HTTPException(response.status_code, detail=response.json().get("detail"))
-    return dict(response.json())
+    refund = dict(response.json())
+    async with scoped(_pool(request), principal) as connection:
+        await audit(
+            connection,
+            principal,
+            "refund_created",
+            str(refund.get("refund_id", body.payment_id)),
+            json.dumps({"payment_id": str(body.payment_id), "amount_minor": amount}),
+        )
+    return refund
 
 
 @router.get("/settlements")

@@ -61,6 +61,15 @@ async def _proxy(
     return response.json()
 
 
+async def _audited(
+    request: Request, principal: Principal, action: str, subject: str, details: Any, result: Any
+) -> Any:
+    """Record a successful staff action in the hash-chained audit log, then return its result."""
+    async with scoped(_pool(request), principal) as connection:
+        await audit(connection, principal, action, subject, json.dumps(details, default=str))
+    return result
+
+
 # Payments ------------------------------------------------------------------------------------
 @router.get("/payments")
 async def search_payments(
@@ -274,7 +283,7 @@ async def recon_act(
     if not path.startswith(("runs", "breaks/", "files/fetch")) or ".." in path:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Unknown recon action."})
     body = await request.json() if await request.body() else None
-    return await _proxy(
+    result = await _proxy(
         request,
         principal,
         "recon",
@@ -283,6 +292,7 @@ async def recon_act(
         json_body=body,
         params=dict(request.query_params),
     )
+    return await _audited(request, principal, "recon_action", path, body or {}, result)
 
 
 # Risk console --------------------------------------------------------------------------------
@@ -313,13 +323,16 @@ async def resolve_review(
     request: Request,
     principal: Annotated[Principal, Depends(require("risk:reviews:act"))],
 ) -> Any:
-    return await _proxy(
+    result = await _proxy(
         request,
         principal,
         "risk",
         "POST",
         f"/v1/reviews/{case_id}/resolve",
         json_body=body.model_dump(),
+    )
+    return await _audited(
+        request, principal, f"risk_review_{body.outcome}", str(case_id), body.model_dump(), result
     )
 
 
@@ -347,14 +360,11 @@ async def propose_champion(
 async def run_drift(
     request: Request, principal: Annotated[Principal, Depends(require("risk:read"))]
 ) -> Any:
-    return await _proxy(
-        request,
-        principal,
-        "risk",
-        "POST",
-        "/v1/drift/run",
-        params={"sample": request.query_params.get("sample", "5000")},
+    sample = request.query_params.get("sample", "5000")
+    result = await _proxy(
+        request, principal, "risk", "POST", "/v1/drift/run", params={"sample": sample}
     )
+    return await _audited(request, principal, "risk_drift_run", "drift", {"sample": sample}, result)
 
 
 # AML-lite ------------------------------------------------------------------------------------
@@ -509,6 +519,28 @@ class ChaosModes(BaseModel):
     payout_mode: str | None = None
     card_network_mode: str | None = None
     payer_psp_mode: str | None = None
+
+
+@router.get("/chaos")
+async def chaos_state(
+    request: Request,
+    principal: Annotated[Principal, Depends(require("chaos:control"))],
+) -> dict[str, Any]:
+    """Current simulator modes, so the console shows what is broken right now."""
+    state = request.app.state
+    if not getattr(state, "chaos_enabled", False):
+        raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "Chaos control is off."})
+    result: dict[str, Any] = {}
+    for service in ("bank", "network", "psp"):
+        client: httpx.AsyncClient | None = getattr(state, f"sim_{service}_http", None)
+        if client is None:
+            continue
+        response = await client.get(
+            "/internal/v1/modes", headers={"x-simulator-admin": state.simulator_admin_key}
+        )
+        if response.status_code == 200:
+            result[service] = response.json()
+    return result
 
 
 @router.post("/chaos")

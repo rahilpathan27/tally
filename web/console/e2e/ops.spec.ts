@@ -45,3 +45,31 @@ test("switch monitor streams live updates", async ({ page }) => {
   await page.goto("/ops");
   await expect(page.getByText("Live (SSE)")).toBeVisible({ timeout: 10_000 });
 });
+
+test("chaos page shows what is degraded now, and restoring clears it", async ({ page }) => {
+  await login(page, "operator@tally.test");
+  await page.goto("/ops/chaos");
+  await page.getByLabel("Bank bank-c").selectOption("decline");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(page.getByText("Simulators updated.")).toBeVisible();
+  // A fresh load reads the live simulator state instead of showing defaults.
+  await page.reload();
+  await expect(page.getByTestId("chaos-current")).toHaveText("Currently degraded: bank-c: decline");
+  await expect(page.getByLabel("Bank bank-c")).toHaveValue("decline");
+  await page.getByLabel("Bank bank-c").selectOption("approve");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(page.getByTestId("chaos-current")).toHaveText("All simulators are healthy (approve).");
+});
+
+test("reconciliation: fetch the bank statement twice, run, no duplicate breaks", async ({ page }) => {
+  await login(page, "ops@tally.test");
+  await page.goto("/ops/recon");
+  for (let i = 0; i < 2; i++) {
+    await page.getByRole("button", { name: "Fetch bank statement" }).click();
+    await expect(page.getByText("Statement fetched.")).toBeVisible();
+  }
+  await page.getByRole("button", { name: "Run reconciliation" }).click();
+  await expect(page.getByText("Reconciliation finished")).toBeVisible();
+  const latest = page.getByRole("table", { name: "Reconciliation runs" }).locator("tbody tr").first();
+  await expect(latest).not.toContainText("duplicate");
+});

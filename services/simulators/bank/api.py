@@ -309,6 +309,19 @@ def create_app(config: BankSimulatorConfig | None = None) -> FastAPI:
             "payout_mode": current.payout_mode,
         }
 
+    @app.get("/internal/v1/modes")
+    async def get_modes(x_simulator_admin: str = Header(default="")) -> dict[str, object]:
+        """Current chaos modes, so the console can show what is broken right now."""
+        expected = os.environ.get("TALLY_SIMULATOR_ADMIN_KEY", "")
+        if not expected or not hmac.compare_digest(expected, x_simulator_admin):
+            raise HTTPException(401, "simulator admin authentication failed")
+        current: BankSimulatorConfig = app.state.config
+        return {
+            "modes": current.modes,
+            "refund_mode": current.refund_mode,
+            "payout_mode": current.payout_mode,
+        }
+
     @app.get("/internal/v1/journal")
     async def journal() -> list[dict[str, object]]:
         current: BankSimulatorConfig = app.state.config

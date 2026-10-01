@@ -251,9 +251,12 @@ async def ingest_file(
 async def _statement(
     ctx: ReconContext, source: str, day: date
 ) -> tuple[list[BankRecord], list[uuid.UUID]] | None:
+    # Each statement file is a complete statement for its date, so a re-sent or re-fetched file
+    # replaces the earlier version of the same format; combining them would report every line
+    # twice as a duplicate. Different formats from one source are still combined.
     files = await ctx.pool.fetch(
-        """SELECT file_id, format, object_key FROM recon_files
-           WHERE source = $1 AND business_date = $2 ORDER BY ingested_at""",
+        """SELECT DISTINCT ON (format) file_id, format, object_key FROM recon_files
+           WHERE source = $1 AND business_date = $2 ORDER BY format, ingested_at DESC""",
         source,
         day,
     )

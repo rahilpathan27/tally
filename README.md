@@ -28,9 +28,14 @@ tour that prints what happens at each step:
 6. a bank outage: the payment's outcome becomes unknown and the recovery worker resolves it;
 7. the ledger's integrity verifier and a balanced trial balance.
 
-Afterwards open <http://localhost:3000> (merchant `admin@demo.test`, operations `ops@tally.test`,
-passwords in `.data/dev-stack.json`). `make demo-stop` ends it. A presenter's walkthrough is in
-[docs/demo-script.md](docs/demo-script.md).
+Afterwards open <http://localhost:3000> (merchant `admin@demo.test`, operations `ops@tally.test`;
+every demo user's password is `correct horse battery staple`). `make demo-stop` ends it.
+
+To test it properly, follow the [testing guide](docs/testing-guide.md): what to click, what
+should happen, the behaviours that surprise people, and
+`uv run python -m scripts.edge_cases`, which drives 26 failure modes and edge cases through the
+real services and checks each payment's final state and ledger effect. A presenter's
+walkthrough is in [docs/demo-script.md](docs/demo-script.md).
 
 ## Highlights
 
@@ -104,6 +109,7 @@ the ledger to post. Full diagrams, the payment sequence and trust boundaries are
 
 ## Documentation
 
+- [Testing guide](docs/testing-guide.md): how to test every flow and edge case
 - [Architecture](docs/architecture.md), [guarantees](docs/guarantees.md), [ledger design](docs/ledger-design.md), [APIs](docs/api.md)
 - Decisions: [docs/adr](docs/adr) (ADR-001 to ADR-019)
 - Reports: [chaos](docs/chaos-report.md), [reconciliation](docs/recon-report.md), [risk model](docs/risk-model-card.md), [load test](docs/load-test-report.md), [backup/restore](docs/backup-restore-report.md), [canary drill](docs/k8s-drill-report.md)

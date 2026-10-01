@@ -171,6 +171,14 @@ def test_risk_decisions_drive_the_payment_flow() -> None:
             review_id, review = await _upi(stack, 9_500_000, "big", home)
             assert review.json()["status"] == "risk_review"
             assert review.json()["next_action"] == "await_review"
+            # Back-to-back large transfers from one payer are blocked outright by the model. Sent
+            # immediately: "seconds since the last payment" is wall-clock, so on a slow machine a
+            # later send would look less rapid and be reviewed instead of blocked.
+            _, rapid = await _upi(stack, 9_600_000, "big-rapid", home)
+            assert (
+                rapid.json()["status"] == "failed"
+                and "LARGE_TRANSFER" in rapid.json()["reason_codes"]
+            )
             bypass = await stack.send(
                 "POST", f"/v1/payment_intents/{review_id}/confirm", {}, "big-f2"
             )
@@ -188,12 +196,6 @@ def test_risk_decisions_drive_the_payment_flow() -> None:
             )
             assert resolved.json()["status"] == "approved"
             assert await _status(stack, review_id) == "succeeded"
-            # Back-to-back large transfers from one payer are blocked outright by the model.
-            _, rapid = await _upi(stack, 9_600_000, "big-rapid", home)
-            assert (
-                rapid.json()["status"] == "failed"
-                and "LARGE_TRANSFER" in rapid.json()["reason_codes"]
-            )
             await stack.general_pool.execute(
                 "INSERT INTO core_vpas(vpa, bank_id) VALUES ('payer2@bank-a', 'bank-a')"
             )

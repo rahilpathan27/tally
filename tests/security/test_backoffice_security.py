@@ -390,6 +390,11 @@ async def _dual_control(stack: LocalStack, bo: Backoffice) -> None:
         "SELECT amount_minor FROM refunds WHERE payment_id = $1", uuid.UUID(payment_id)
     )
     assert sorted(r["amount_minor"] for r in refunds) == [500, 20_000]
+    # Every staff action that moves or releases money is in the audit log, not only approvals.
+    audited = await stack.general_pool.fetch(
+        "SELECT action FROM audit_log WHERE actor = 'refund.admin@tally.test'"
+    )
+    assert "refund_created" in {r["action"] for r in audited}
 
     # Chaos control is operator-only and changes the simulator.
     chaos = await maker.post("/bff/v1/ops/chaos", json={"bank_modes": {"bank-a": "timeout"}})

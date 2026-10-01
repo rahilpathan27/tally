@@ -179,6 +179,18 @@ def test_three_way_recon_finds_every_planted_break(tmp_path: Path) -> None:
             for fmt in ("csv_rupees_ist", "fixed_paise_utc", "json_offset"):
                 parsed, issues = parse_statement(write_statement(numbered, fmt), fmt)
                 assert not issues and len(parsed) == len(numbered)
+            # An earlier, partial version of the day's statement (an intraday pull). The full
+            # statement below replaces it; combining both would report spurious duplicates.
+            early = await recon.post(
+                "/v1/files",
+                params={
+                    "source": "sponsor-bank",
+                    "business_date": today.isoformat(),
+                    "format": "fixed_paise_utc",
+                },
+                content=write_statement(numbered[:5], "fixed_paise_utc"),
+            )
+            assert early.status_code == 201, early.text
             uploaded = await recon.post(
                 "/v1/files",
                 params={
