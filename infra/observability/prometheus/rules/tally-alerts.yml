@@ -110,6 +110,13 @@ groups:
         annotations:
           summary: "{{ $value }} outbox events unpublished"
           runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/webhook-backlog.md
+      - alert: CoreShedding
+        expr: sum(rate(tally_load_shed_total{service="core"}[5m])) > 0.1
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Core is refusing {{ $value | humanize }} requests/s at its in-flight cap"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/overload.md
       # Merchant API availability SLO 99.9%: multi-window burn-rate alerts (fast and slow).
       - alert: ErrorBudgetBurnFast
         expr: |

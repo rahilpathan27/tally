@@ -530,8 +530,15 @@ async def seed_chaos_routes(stack: LocalStack) -> None:
     )
 
 
-async def run(scenarios: int, seed: int, check_every: int, only: int | None) -> dict[str, Any]:
-    general, ledger, vault = await provision_databases("tally_chaos")
+async def run(
+    scenarios: int,
+    seed: int,
+    check_every: int,
+    only: int | None,
+    start: int = 0,
+    db_prefix: str = "tally_chaos",
+) -> dict[str, Any]:
+    general, ledger, vault = await provision_databases(db_prefix)
     stack = await build_stack(
         general, ledger, vault, os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
     )
@@ -539,7 +546,7 @@ async def run(scenarios: int, seed: int, check_every: int, only: int | None) -> 
     harness = FlowChaos(stack)
     outcome = Outcome()
     started = time.monotonic()
-    indexes = [only] if only is not None else range(scenarios)
+    indexes = [only] if only is not None else range(start, start + scenarios)
     try:
         for count, index in enumerate(indexes, start=1):
             scenario = make_scenario(index, seed)
@@ -559,6 +566,7 @@ async def run(scenarios: int, seed: int, check_every: int, only: int | None) -> 
         await stack.close()
     return {
         "seed": seed,
+        "first_index": indexes[0],
         "scenarios": len(indexes),
         "seconds": round(time.monotonic() - started, 1),
         "recon_expected_breaks": outcome.recon_expected_breaks,
@@ -572,8 +580,13 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20_260_930)
     parser.add_argument("--check-every", type=int, default=250)
     parser.add_argument("--only", type=int, default=None, help="replay one scenario index")
+    # Shards of one seeded run execute in parallel on separate databases (scripts/chaos_100k.sh).
+    parser.add_argument("--start", type=int, default=0, help="first scenario index")
+    parser.add_argument("--db-prefix", default="tally_chaos")
     args = parser.parse_args()
-    report = asyncio.run(run(args.scenarios, args.seed, args.check_every, args.only))
+    report = asyncio.run(
+        run(args.scenarios, args.seed, args.check_every, args.only, args.start, args.db_prefix)
+    )
     print("TALLY FLOW CHAOS: PASS")
     print(json.dumps(report, indent=2))
     return 0

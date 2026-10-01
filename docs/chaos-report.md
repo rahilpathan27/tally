@@ -31,6 +31,13 @@ and a "one terminal transition per payment" check.
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |
 | default | 20260930 | 5,000 | 902 | 113 | 68 | 2 | PASS | 359 s |
 | alternate | 7 | 5,000 | 779 | 77 | 59 | 6 | PASS (before provisioning cache) | 429 s |
+| **Phase 15: 100k** | 20261001 | **100,000** (4 parallel shards of 25,000 on separate databases) | 17,513 | 1,909 | 1,373 | 154 | **PASS** | 3,742 s wall |
+
+Outcome mix for the 100k run: card succeeded 23,317 / cancelled 8,319 / failed 4,020 / reversed
+14,276; UPI succeeded 14,034 / failed 16,244 / reversed 19,790. 2,063 scenarios produced the
+discrepancies reconciliation is expected to flag (late successes corrected to suspense and the
+opt-in deemed-success policy). Reproduce with `make chaos-100k` (`SEED`, `TOTAL`, `SHARDS`
+variables); any failure prints the scenario index and seed, replayable with `--only`.
 
 Outcome mix for the default run: card succeeded 1,202 / cancelled 368 / failed 188 / reversed 714;
 UPI succeeded 714 / failed 773 / reversed 1,041.
@@ -79,3 +86,37 @@ This is reproducible model-based failure injection against the ledger and paymen
 ## Regression verification
 
 The full default suite passed (80 passed, 7 database/Redis tests skipped because the default run does not set integration-service URLs). Dedicated ledger, gateway, vault, and core payment integration targets all passed against the local Compose services. Lint, strict typing, the float-ban check, OpenAPI drift checks, and the mutation score gate passed (76.0%).
+
+## On-cluster chaos (Phase 15)
+
+`make cluster-chaos` (`scripts/cluster_chaos.py`) on 2026-10-01: the Helm chart on the local
+Kubernetes cluster (see the [load-test report](load-test-report.md) for hardware), 60 signed UPI
+payments/s for 8 minutes, with this timeline:
+
+| Time | Fault |
+| --- | --- |
+| t+60 s | SIGKILL a core API pod |
+| t+100 s | SIGKILL the core worker (recovery, settlement, outbox loops) |
+| t+140 s | SIGKILL a ledger pod |
+| t+180 s | SIGKILL a risk pod |
+| t+220 s | SIGKILL the bank simulator (its in-memory state is lost) |
+| t+260 s | SIGKILL a PostgreSQL backend: the server resets every connection and runs crash recovery |
+| t+346 s | Network partition: core's egress to the ledger removed for 45 s |
+| t+380 s | SIGKILL another core API pod |
+
+Audit after the load (`PASS`, 0 problems):
+
+| Check | Result |
+| --- | --- |
+| Payments created | 28,351: 17,478 succeeded, 3 reversed, 10,862 held in risk review, 8 never confirmed by the client |
+| Payments left in a non-terminal state | 0 (all settled within 1 s of the load ending) |
+| Succeeded payments with exactly one ledger transfer of the right amount | 17,478 / 17,478 |
+| Non-succeeded payments with a transfer, or ledger transfers without a succeeded payment | 0 |
+| Ledger verifier (balanced entries, balances vs postings, hash chain) | pass |
+| Client view | 0.8% of requests failed (connections cut by the kills); e2e p50 21 ms, p99 528 ms |
+
+The 38% review rate is an artefact of the test, not of the faults: the same 20,000 synthetic payers
+had already made over 150,000 payments that day, so velocity features held many for review. Review
+holds stop before any money moves, so they reduce how many payments exercised the bank and
+ledger path. The bank simulator's truth is lost when it is killed, so bank-side truth is checked
+by `chaos/flow_sim.py` and reconciliation rather than here.

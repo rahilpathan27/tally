@@ -19,6 +19,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from libs.common.admission import AdmissionControl
 from libs.common.object_store import s3_store_from_env
 from libs.idempotency.store import PostgresIdempotencyStore
 from libs.observability.metrics import BANK_OUTCOMES, instrument
@@ -405,7 +406,9 @@ def create_app() -> FastAPI:
         app.state.gateway_auth = MerchantHmacAuth(pool, cipher.decrypt)
         app.state.gateway_rate_limiter = MerchantRateLimiter(redis, namespace="gateway:merchant")
         app.state.gateway_idempotency = PostgresIdempotencyStore(pool)
-        app.state.gateway_rate_limit_policy = lambda _: (120, 60)
+        # Requests per minute per merchant; raised only for load tests.
+        per_minute = int(os.environ.get("TALLY_MERCHANT_RATE_LIMIT_PER_MINUTE", "120"))
+        app.state.gateway_rate_limit_policy = lambda _: (per_minute, 60)
         app.state.payment_repository = PaymentIntentRepository(pool)
         app.state.ledger_http = httpx.AsyncClient(
             base_url=os.environ.get("TALLY_LEDGER_URL", "http://127.0.0.1:8001"), timeout=5.0
@@ -504,6 +507,12 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Tally Payment API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(SecurityMiddleware, max_body_bytes=2_000_000)
+    # Outside auth and the database, inside metrics (so shed requests count as 503s).
+    app.add_middleware(
+        AdmissionControl,
+        service="core",
+        max_in_flight=int(os.environ.get("TALLY_MAX_IN_FLIGHT", "64")),
+    )
     instrument(app, "core")
     configure_tracing("core", app)
     app.state.payment_repository = None

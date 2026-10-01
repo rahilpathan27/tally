@@ -37,6 +37,11 @@ workloads:
   bank-sim: {resources: *small}
   payer-psp-sim: {resources: *small}
   network-sim: {resources: *small}
+# No object storage in the local drill cluster: audit anchoring needs S3 (Object Lock) and fails
+# loudly without it, so only the AML detectors run locally.
+cronJobs:
+  audit-anchor: null
+  verify-anchors: null
 rollouts:
   steps:
     - setWeight: 50

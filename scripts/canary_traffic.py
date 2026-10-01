@@ -30,38 +30,47 @@ SCOPES = ["payments:write", "payments:read"]
 PAYERS = 200  # distinct payers keep risk velocity rules out of the way
 
 
-async def seed() -> dict[str, str]:
+async def seed(
+    merchants: int = 1, payers: int = PAYERS, prefix: str = "drill"
+) -> list[dict[str, str]]:
+    """Create ``merchants`` test merchants with one API key each, plus ``payers`` payer VPAs."""
     key = base64.b64decode(os.environ["TALLY_API_KEY_ENCRYPTION_KEY"], altchars=b"-_")
-    merchant_id = "drill-merchant"
-    key_id = f"key_drill_{secrets.token_hex(6)}"
-    secret = secrets.token_bytes(32)
+    cipher = ApiKeyCipher(key)
+    created = []
     connection = await asyncpg.connect(os.environ["TALLY_DATABASE_URL"])
     try:
-        await connection.execute(
-            """INSERT INTO merchants(merchant_id, display_name) VALUES ($1, 'Canary Drill')
-               ON CONFLICT (merchant_id) DO NOTHING""",
-            merchant_id,
-        )
-        # A fresh cluster has no VPA directory; register the drill's payers and payee.
+        # A fresh cluster has no VPA directory; register the payers and the payee.
         await connection.execute(
             """INSERT INTO core_vpas(vpa, bank_id)
-               SELECT 'drill' || n || '@bank-a', 'bank-a' FROM generate_series(0, $1 - 1) n
+               SELECT $2 || n || '@bank-a', 'bank-a' FROM generate_series(0, $1 - 1) n
                UNION ALL SELECT 'merchant@bank-b', 'bank-b'
                ON CONFLICT (vpa) DO NOTHING""",
-            PAYERS,
+            payers,
+            prefix,
         )
-        await connection.execute(
-            """INSERT INTO merchant_api_keys(key_id, merchant_id, secret_ciphertext, scopes,
-                   mode, expires_at) VALUES ($1, $2, $3, $4, 'test', $5)""",
-            key_id,
-            merchant_id,
-            ApiKeyCipher(key).encrypt(key_id, secret),
-            SCOPES,
-            datetime.now(UTC) + timedelta(days=1),
-        )
+        for i in range(merchants):
+            merchant_id = f"{prefix}-merchant" if merchants == 1 else f"{prefix}-merchant-{i}"
+            key_id = f"key_{prefix}_{secrets.token_hex(6)}"
+            secret = secrets.token_bytes(32)
+            await connection.execute(
+                """INSERT INTO merchants(merchant_id, display_name) VALUES ($1, $2)
+                   ON CONFLICT (merchant_id) DO NOTHING""",
+                merchant_id,
+                f"{prefix.title()} merchant {i}",
+            )
+            await connection.execute(
+                """INSERT INTO merchant_api_keys(key_id, merchant_id, secret_ciphertext,
+                       scopes, mode, expires_at) VALUES ($1, $2, $3, $4, 'test', $5)""",
+                key_id,
+                merchant_id,
+                cipher.encrypt(key_id, secret),
+                SCOPES,
+                datetime.now(UTC) + timedelta(days=1),
+            )
+            created.append({"key_id": key_id, "secret_b64": base64.b64encode(secret).decode()})
     finally:
         await connection.close()
-    return {"key_id": key_id, "secret_b64": base64.b64encode(secret).decode()}
+    return created
 
 
 async def signed(
@@ -133,14 +142,19 @@ async def traffic(seconds: float, rate: float) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("seed")
+    seed_cmd = sub.add_parser("seed")
+    seed_cmd.add_argument("--merchants", type=int, default=1)
+    seed_cmd.add_argument("--payers", type=int, default=PAYERS)
+    seed_cmd.add_argument("--prefix", default="drill")
     run = sub.add_parser("traffic")
     run.add_argument("--seconds", type=float, default=600)
     # The gateway allows 120 requests/min per merchant; each payment is create + confirm.
     run.add_argument("--rate", type=float, default=0.8, help="payments per second")
     args = parser.parse_args()
     if args.command == "seed":
-        print(json.dumps(asyncio.run(seed())))
+        created = asyncio.run(seed(args.merchants, args.payers, args.prefix))
+        # The drill reads one object; load tests read the list.
+        print(json.dumps(created[0] if args.merchants == 1 else created))
     else:
         asyncio.run(traffic(args.seconds, args.rate))
     return 0

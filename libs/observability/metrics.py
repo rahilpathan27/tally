@@ -97,6 +97,9 @@ SETTLEMENT_FAILURES = Counter("tally_settlement_failures_total", "Settlement run
 # Security events
 AUTH_EVENTS = Counter("tally_auth_events_total", "Authentication events", ["event"])
 RATE_LIMITED = Counter("tally_rate_limited_total", "Requests rejected by rate limits")
+LOAD_SHED = Counter(
+    "tally_load_shed_total", "Requests refused by admission control (overload)", ["service"]
+)
 SSRF_BLOCKED = Counter("tally_ssrf_blocked_total", "Webhook deliveries blocked by SSRF checks")
 
 # Per-merchant usage (merchant IDs are a bounded, known set in this simulation)

@@ -96,3 +96,16 @@ tests:
             exp_annotations:
               summary: "Payments to bank-a are being short-circuited by the circuit breaker"
               runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/bank-outage.md
+  - interval: 30s
+    input_series:
+      - series: 'tally_load_shed_total{service="core"}'
+        values: '0+0x10 0+60x30'
+    alert_rule_test:
+      - {eval_time: 4m, alertname: CoreShedding, exp_alerts: []}
+      - eval_time: 15m
+        alertname: CoreShedding
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Core is refusing 2 requests/s at its in-flight cap"
+              runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/overload.md

@@ -37,7 +37,10 @@ services:
       POSTGRES_DB: tally_vault
     ports: ["127.0.0.1:55434:5432"]
     volumes: ["postgres-vault-data:/var/lib/postgresql/data"]
-    networks: [vault-isolated]
+    # vault-host exists only so Docker Engine 29+ publishes the loopback port (it no longer
+    # publishes ports for containers attached solely to internal networks). No other service
+    # joins either network, so containers still cannot reach the vault database.
+    networks: [vault-isolated, vault-host]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tally -d tally_vault"]
       interval: 5s
@@ -95,3 +98,4 @@ volumes:
 networks:
   vault-isolated:
     internal: true
+  vault-host: {}

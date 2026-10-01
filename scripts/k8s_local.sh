@@ -98,7 +98,7 @@ wait_rollout() { # wait_rollout <phase regex> <timeout seconds>
 
 cmd_up() {
   if ! minikube -p "$PROFILE" status >/dev/null 2>&1; then
-    minikube start -p "$PROFILE" --driver=docker --cpus=4 --memory=4800 --cni=calico \
+    minikube start -p "$PROFILE" --driver=docker --cpus=${K8S_CPUS:-6} --memory=${K8S_MEMORY:-7168} --cni=calico \
       --kubernetes-version=v1.31.4 --wait=all
   fi
   log "Argo Rollouts $ROLLOUTS_VERSION"

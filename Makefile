@@ -1,4 +1,4 @@
-.PHONY: images infra-check security-scan k8s-up k8s-drill k8s-down observability-up observability-down dashboards alert-rules-test alert-drill dev web web-check e2e backoffice-api train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
+.PHONY: demo-stop loadtest-k8s cluster-chaos backup-drill chaos-100k images infra-check security-scan k8s-up k8s-drill k8s-down observability-up observability-down dashboards alert-rules-test alert-drill dev web web-check e2e backoffice-api train retrain risk-api recon-api recon-eval migrate stack-test-integration up down lint test mutation openapi ledger-api ledger-migrate ledger-test-integration gateway-migrate gateway-test-integration gateway-cleanup vault-api vault-migrate vault-test-integration core-api core-migrate core-test-integration bank-sim payer-psp-sim card-network-sim seed simulate train loadtest chaos demo deploy-dev destroy-dev
 
 LEDGER_DB ?= tally_ledger_v1
 CHAOS_FLOW_SCENARIOS ?= 2000
@@ -156,5 +156,26 @@ deploy-dev destroy-dev:
 	@echo "$@ needs an AWS account and credentials, which this project does not have."
 	@echo "See docs/deployment.md (Applying to AWS). Local equivalent: make k8s-up k8s-drill."
 
-simulate loadtest demo:
-	@echo "$@ is not available yet. See docs/PROGRESS.md for implementation status."
+demo:
+	scripts/demo.sh
+
+demo-stop:
+	-kill $$(cat .data/demo/services.pid .data/demo/console.pid 2>/dev/null) 2>/dev/null
+	-pkill -f "next dev" 2>/dev/null
+	rm -f .data/demo/*.pid
+
+# Payment load against the local Kubernetes deployment (make k8s-up first).
+loadtest loadtest-k8s:
+	uv run python -m scripts.loadtest_k8s --prepare --scenario steady --rate $${RATE:-50} --duration $${DURATION:-5m}
+
+cluster-chaos:
+	uv run python -m scripts.cluster_chaos --rate $${RATE:-30} --duration $${DURATION:-8m}
+
+backup-drill:
+	uv run python -m scripts.backup_drill
+
+chaos-100k:
+	scripts/chaos_100k.sh
+
+simulate:
+	uv run python -m chaos.flow_sim --scenarios 200
