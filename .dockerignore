@@ -1,0 +1,15 @@
+.git
+.venv
+.data
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.hypothesis
+mutants
+**/__pycache__
+web/console/node_modules
+web/console/.next
+web/console/test-results
+web/console/playwright-report
+ml/artifacts/*
+!ml/artifacts/fraud-gbm-v1

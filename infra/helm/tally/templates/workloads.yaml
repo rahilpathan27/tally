@@ -1,0 +1,128 @@
+{{- range $name, $w := .Values.workloads }}
+{{- if ne (toString $w.enabled) "false" }}
+---
+{{- if eq $w.kind "Rollout" }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+{{- else }}
+apiVersion: apps/v1
+kind: Deployment
+{{- end }}
+metadata:
+  name: {{ include "tally.name" $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" $name) | nindent 4 }}
+spec:
+  {{- if not $w.hpa }}
+  replicas: {{ $w.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "tally.selector" $name | nindent 6 }}
+  template:
+    {{- include "tally.podTemplate" (dict "root" $ "name" $name "w" $w) | nindent 4 }}
+  {{- if eq $w.kind "Rollout" }}
+  strategy:
+    canary:
+      # Replica-weighted canary: the Service selects stable and canary pods alike, so the canary
+      # takes live traffic in proportion to its replicas (no mesh or ALB weights required).
+      maxUnavailable: 0
+      # Analysis runs for the whole canary; any failed measurement aborts and scales the
+      # canary to zero, leaving the stable ReplicaSet serving.
+      analysis:
+        startingStep: 1
+        templates:
+          - templateName: tally-canary-errors
+          - templateName: tally-canary-latency
+          - templateName: tally-ledger-integrity
+        args:
+          - name: service
+            value: {{ $name }}
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+      steps:
+        {{- toYaml $.Values.rollouts.steps | nindent 8 }}
+  {{- else }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tally.name" $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" $name) | nindent 4 }}
+spec:
+  selector:
+    {{- include "tally.selector" $name | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $w.port }}
+      targetPort: http
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tally.name" $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" $name) | nindent 4 }}
+  {{- with (index $.Values.serviceAccounts.roleArns $name) }}
+  annotations:
+    eks.amazonaws.com/role-arn: {{ . }}
+  {{- end }}
+automountServiceAccountToken: false
+{{- if $w.hpa }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "tally.name" $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" $name) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    {{- if eq $w.kind "Rollout" }}
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    {{- else }}
+    apiVersion: apps/v1
+    kind: Deployment
+    {{- end }}
+    name: {{ include "tally.name" $name }}
+  minReplicas: {{ $w.hpa.min }}
+  maxReplicas: {{ $w.hpa.max }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ $w.hpa.cpu }}}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies: [{type: Percent, value: 50, periodSeconds: 60}]
+{{- end }}
+{{- if $w.pdb }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tally.name" $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" $name) | nindent 4 }}
+spec:
+  {{- toYaml $w.pdb | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "tally.selector" $name | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}

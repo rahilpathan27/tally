@@ -1,0 +1,50 @@
+# Checkov configuration for `make infra-check`. Every skipped check has a reason; anything not
+# listed here must pass. Reviewed in Phase 14 (see docs/deployment.md, "Scanner exceptions").
+compact: true
+quiet: true
+skip-check:
+  # Variable-driven: prod sets Multi-AZ, failover and deletion protection; dev turns them off
+  # to save cost. The scanner cannot evaluate module inputs.
+  - CKV_AWS_157   # RDS Multi-AZ (var.multi_az)
+  - CKV_AWS_293   # RDS deletion protection (var.deletion_protection)
+  - CKV2_AWS_50   # ElastiCache Multi-AZ failover (replicas > 1)
+  # KMS key policies must use Resource "*" (it means "this key"); ecr:GetAuthorizationToken
+  # has no resource-level permissions.
+  - CKV_AWS_109
+  - CKV_AWS_111
+  - CKV_AWS_356
+  # Redis auth token and MSK SCRAM secret are rotated by runbook (docs/runbooks), not Lambda.
+  - CKV2_AWS_57
+  # S3 event notifications and access logs: CloudTrail data events already record every
+  # object write; the object bucket supports optional server access logging.
+  - CKV2_AWS_62
+  - CKV_AWS_18
+  # Cross-region S3 replication is a documented gap; RDS backups do replicate to ap-south-2.
+  - CKV_AWS_144
+  # CloudTrail -> CloudWatch Logs metric filters are used instead of an SNS topic per file.
+  - CKV_AWS_252
+  # GuardDuty is enabled per account/region here; organisation-wide delegation is an org task.
+  - CKV2_AWS_3
+  # The hosted zone is usually pre-existing; DNSSEC and query logging are managed with it.
+  - CKV2_AWS_38
+  - CKV2_AWS_39
+  # CloudFront serves only public, hashed static assets: no root object, no origin failover
+  # (the ALB is the only origin), no geo restriction, access logs not needed for public JS.
+  - CKV_AWS_305
+  - CKV_AWS_310
+  - CKV_AWS_374
+  - CKV_AWS_86
+  # The edge ACL is passed in as a module output (it does include KnownBadInputs/Log4j);
+  # the graph check cannot follow it across modules.
+  - CKV2_AWS_47
+  # Kubernetes liveness/readiness probes replace Docker HEALTHCHECK.
+  - CKV_DOCKER_2
+  # ExternalSecret references name secret keys; they contain no secret values.
+  - CKV_SECRET_6
+  # CPU limits are deliberately unset (CFS throttling hurts p99 latency); CPU requests and
+  # memory limits are set and enforced by Kyverno.
+  - CKV_K8S_11
+  # The services read configuration from the environment; the Secrets are materialised by
+  # External Secrets and encrypted at rest in etcd with a KMS key. Files would not change who
+  # can read them (anyone with exec into the pod can read both).
+  - CKV_K8S_35

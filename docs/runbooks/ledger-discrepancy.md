@@ -12,6 +12,11 @@
    and recomputes them from postings.
 
 ## Diagnose
+- Only `check="verifier_available"` is 0 and every other check is 1: the verifier could not reach
+  the ledger database; this is an availability problem, not a money one. Since Phase 14 a later
+  successful run clears it automatically. If it stays 0, check the pod's database connectivity
+  (NetworkPolicy egress to the data subnets, RDS status). The same series gates Argo Rollouts
+  canaries (`tally-ledger-integrity`), so while it is 0 every core and ledger release aborts.
 - `balances_match_history` false: compare `ledger_account_balances` with the recomputation in
   `ledger_verify_snapshot(<snapshot>)` to find the account and entry range.
 - `hash_chain` false: someone changed history. Find the first entry whose hash does not verify

@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tally-staging
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: tally
+  source:
+    repoURL: https://github.com/rahilpathan27/tally
+    targetRevision: main
+    path: infra/helm/tally
+    helm:
+      releaseName: tally
+      valueFiles: [../../argocd/values/staging.yaml]
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tally-staging
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true, PruneLast=true]
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: latest
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+        tally.io/environment: staging
+    retry:
+      limit: 3
+      backoff: {duration: 30s, factor: 2, maxDuration: 5m}
+  ignoreDifferences:
+    - {group: apps, kind: Deployment, jsonPointers: [/spec/replicas]}
+    - {group: argoproj.io, kind: Rollout, jsonPointers: [/spec/replicas]}

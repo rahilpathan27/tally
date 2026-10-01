@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal, cast
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
@@ -19,7 +20,9 @@ class AuthorizationRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     payment_id: str = Field(min_length=1, max_length=64)
-    payment_method_token: str = Field(min_length=8, max_length=200)
+    # Vault tokens are vlt_ + URL-safe base64; the strict pattern keeps the value from altering
+    # the detokenize URL path (e.g. "../") it is interpolated into.
+    payment_method_token: str = Field(pattern=r"^vlt_[A-Za-z0-9_-]{8,128}$")
     amount_minor: int = Field(strict=True, gt=0, le=9_007_199_254_740_991)
     currency: Literal["INR"]
 
@@ -76,8 +79,8 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
         if not x_simulator_key or not hmac.compare_digest(x_simulator_key, current.service_key):
             raise HTTPException(401, "simulator authentication failed")
         fingerprint = body.model_dump_json()
-        requests = cast(dict[str, tuple[str, AuthorizationResponse]], app.state.requests)
-        prior = requests.get(idempotency_key)
+        seen = cast(dict[str, tuple[str, AuthorizationResponse]], app.state.requests)
+        prior = seen.get(idempotency_key)
         if prior:
             if prior[0] != fingerprint:
                 raise HTTPException(409, "card network idempotency key payload mismatch")
@@ -87,9 +90,11 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
         if not current.vault_network_key:
             raise HTTPException(503, "vault connection is not configured")
         client: httpx.AsyncClient = app.state.http_client
+        token = quote(body.payment_method_token, safe="")
         try:
+            # The host is operator configuration and the token is pattern-validated and quoted.
             response = await client.post(
-                f"{current.vault_url}/internal/v1/tokens/{body.payment_method_token}/detokenize",
+                f"{current.vault_url}/internal/v1/tokens/{token}/detokenize",
                 headers={"x-vault-network-key": current.vault_network_key},
             )
             response.raise_for_status()
@@ -102,7 +107,7 @@ def create_app(config: CardNetworkConfig | None = None) -> FastAPI:
             status="declined" if current.mode == "decline" else "approved",
             network_reference=f"net_{body.payment_id}",
         )
-        requests[idempotency_key] = (fingerprint, result)
+        seen[idempotency_key] = (fingerprint, result)
         app.state.statuses[body.payment_id] = result.status
         if current.mode in {"timeout", "late_success"}:
             raise HTTPException(504, "simulated network response lost after authorization")

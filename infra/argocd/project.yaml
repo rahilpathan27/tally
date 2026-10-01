@@ -1,0 +1,28 @@
+# Tally applications may only deploy this repository's manifests into tally-* namespaces.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: tally
+  namespace: argocd
+spec:
+  description: Tally synthetic payments platform
+  sourceRepos:
+    - https://github.com/rahilpathan27/tally
+  destinations:
+    - {server: https://kubernetes.default.svc, namespace: "tally-*"}
+    - {server: https://kubernetes.default.svc, namespace: kyverno}
+  clusterResourceWhitelist:
+    - {group: "", kind: Namespace}
+    - {group: kyverno.io, kind: ClusterPolicy}
+  namespaceResourceBlacklist:
+    - {group: "", kind: ResourceQuota}
+    - {group: rbac.authorization.k8s.io, kind: "*"}
+  orphanedResources:
+    warn: true
+  roles:
+    - name: deployer
+      description: CI may sync dev and staging; production syncs are manual.
+      policies:
+        - p, proj:tally:deployer, applications, sync, tally/tally-dev, allow
+        - p, proj:tally:deployer, applications, sync, tally/tally-staging, allow
+        - p, proj:tally:deployer, applications, get, tally/*, allow

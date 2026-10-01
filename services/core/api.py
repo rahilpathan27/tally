@@ -19,7 +19,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from libs.common.object_store import S3ObjectStore
+from libs.common.object_store import s3_store_from_env
 from libs.idempotency.store import PostgresIdempotencyStore
 from libs.observability.metrics import BANK_OUTCOMES, instrument
 from libs.observability.tracing import configure_tracing
@@ -27,6 +27,7 @@ from libs.security.http import SecurityMiddleware
 from libs.security.key_encryption import ApiKeyCipher
 from libs.security.rate_limit import MerchantRateLimiter
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from services.api_gateway.auth import MerchantHmacAuth, MerchantPrincipal
 from services.api_gateway.route import GatewayRoute, requires_scope
@@ -400,6 +401,7 @@ def create_app() -> FastAPI:
         pool = await asyncpg.create_pool(database_url, min_size=1, max_size=15)
         redis = Redis.from_url(redis_url)
         app.state.pool = pool
+        app.state.redis = redis
         app.state.gateway_auth = MerchantHmacAuth(pool, cipher.decrypt)
         app.state.gateway_rate_limiter = MerchantRateLimiter(redis, namespace="gateway:merchant")
         app.state.gateway_idempotency = PostgresIdempotencyStore(pool)
@@ -428,14 +430,7 @@ def create_app() -> FastAPI:
             else None
         )
         app.state.risk_key = os.environ.get("TALLY_INTERNAL_KEY", "")
-        object_store: object | None = None
-        if os.environ.get("TALLY_S3_ENDPOINT"):
-            object_store = S3ObjectStore(
-                os.environ.get("TALLY_S3_BUCKET", "tally-local"),
-                endpoint_url=os.environ["TALLY_S3_ENDPOINT"],
-                access_key=os.environ.get("TALLY_S3_ACCESS_KEY", "local"),
-                secret_key=os.environ.get("TALLY_S3_SECRET_KEY", "local"),
-            )
+        object_store = s3_store_from_env()
         publisher: KafkaPublisher | None = None
         if os.environ.get("TALLY_KAFKA_BOOTSTRAP"):
             publisher = KafkaPublisher(os.environ["TALLY_KAFKA_BOOTSTRAP"])
@@ -480,15 +475,21 @@ def create_app() -> FastAPI:
                     logger.exception("payment recovery cycle failed")
                 await asyncio.sleep(1)
 
-        recovery_task = asyncio.create_task(recovery_loop())
+        # API pods set TALLY_BACKGROUND_WORKERS=0; a separate worker Deployment runs the loops.
+        recovery_task = (
+            asyncio.create_task(recovery_loop())
+            if os.environ.get("TALLY_BACKGROUND_WORKERS", "1") != "0"
+            else None
+        )
         try:
             yield
         finally:
-            recovery_task.cancel()
-            try:
-                await recovery_task
-            except asyncio.CancelledError:
-                pass
+            if recovery_task is not None:
+                recovery_task.cancel()
+                try:
+                    await recovery_task
+                except asyncio.CancelledError:
+                    pass
             await app.state.ledger_http.aclose()
             await app.state.bank_http.aclose()
             await app.state.payer_psp_http.aclose()
@@ -526,6 +527,20 @@ def create_app() -> FastAPI:
     @app.get("/health/live", include_in_schema=False)
     async def live() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/health/ready", include_in_schema=False)
+    async def ready(request: Request) -> dict[str, str]:
+        pool = getattr(request.app.state, "pool", None)
+        redis_client = getattr(request.app.state, "redis", None)
+        try:
+            if pool is None:
+                raise OSError("database pool is not initialised")
+            await pool.fetchval("SELECT 1")
+            if redis_client is not None:
+                await redis_client.ping()
+        except (asyncpg.PostgresError, OSError, RedisError) as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "not ready") from exc
+        return {"status": "ready"}
 
     @app.post("/internal/v1/recovery/run", include_in_schema=False)
     async def run_recovery(request: Request) -> dict[str, int]:

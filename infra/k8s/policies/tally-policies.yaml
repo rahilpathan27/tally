@@ -1,0 +1,146 @@
+# Admission policies for tally-* namespaces. Pod Security Admission ("restricted", set on the
+# namespace by Argo CD) already forbids privileged pods, host namespaces and root; these
+# policies add the controls PSA does not cover.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tally-restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Images only from Tally ECR repositories
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: ecr-only
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["tally-*"]
+      validate:
+        message: "Images must come from the Tally ECR repositories (tally/python, tally/web)."
+        pattern:
+          spec:
+            containers:
+              - image: "*.dkr.ecr.ap-south-1.amazonaws.com/tally/*"
+            =(initContainers):
+              - image: "*.dkr.ecr.ap-south-1.amazonaws.com/tally/*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tally-require-digests
+  annotations:
+    policies.kyverno.io/title: Staging and prod images are pinned by digest
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: digest-required
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [tally-staging, tally-prod]
+      validate:
+        message: "Staging and prod images must be referenced by digest (image@sha256:...)."
+        pattern:
+          spec:
+            containers:
+              - image: "*@sha256:*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tally-workload-hardening
+  annotations:
+    policies.kyverno.io/title: Read-only root filesystem, dropped capabilities, resource bounds
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: readonly-rootfs-and-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["tally-*"]
+      validate:
+        message: >-
+          Containers need readOnlyRootFilesystem, allowPrivilegeEscalation=false, all
+          capabilities dropped, CPU and memory requests, and a memory limit.
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  readOnlyRootFilesystem: true
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: [ALL]
+                resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"
+    - name: no-default-service-account
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["tally-*"]
+      validate:
+        message: "Pods must use a dedicated ServiceAccount."
+        pattern:
+          spec:
+            serviceAccountName: "!default"
+---
+# Secrets in real environments come from AWS Secrets Manager through External Secrets. The
+# chart's inline provider exists only for throwaway local clusters.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tally-no-inline-secrets
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: block-inline
+      match:
+        any:
+          - resources:
+              kinds: [Secret]
+              namespaces: [tally-dev, tally-staging, tally-prod]
+              selector:
+                matchLabels:
+                  tally.io/inline-secret: "true"
+      validate:
+        message: "Inline Secrets are for local clusters only; use ExternalSecrets."
+        deny: {}
+---
+# Every tally namespace must keep a default-deny NetworkPolicy (the chart ships one).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tally-protect-default-deny
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: keep-default-deny
+      match:
+        any:
+          - resources:
+              kinds: [NetworkPolicy]
+              names: [tally-default-deny]
+              namespaces: ["tally-*"]
+              operations: [DELETE]
+      exclude:
+        any:
+          - subjects:
+              - kind: ServiceAccount
+                name: argocd-application-controller
+                namespace: argocd
+      validate:
+        message: "The default-deny NetworkPolicy may only be removed by Argo CD."
+        deny: {}

@@ -1,0 +1,26 @@
+# Trivy exceptions. Each entry needs evidence and an expiry, after which the scan fails again.
+misconfigurations: []
+
+vulnerabilities:
+  # gcr.io/distroless/nodejs22-debian12 still ships Debian's libssl3 3.0.18 (fixed in 3.0.19/20).
+  # The console's only process is Node 22, which statically bundles its own OpenSSL (3.5.4) and
+  # does not load libssl.so.3 (`readelf -d /nodejs/bin/node` lists no libssl/libcrypto; checked
+  # 2026-10-01). Re-check when distroless rebuilds; the Python image is already patched.
+  - id: CVE-2026-31789
+    statement: libssl3 present in distroless base but unused by Node (bundled OpenSSL 3.5.4)
+    expired_at: 2026-10-31
+  - id: CVE-2026-28387
+    statement: same as CVE-2026-31789
+    expired_at: 2026-10-31
+  - id: CVE-2026-28388
+    statement: same as CVE-2026-31789
+    expired_at: 2026-10-31
+  - id: CVE-2026-28389
+    statement: same as CVE-2026-31789
+    expired_at: 2026-10-31
+  - id: CVE-2026-28390
+    statement: same as CVE-2026-31789
+    expired_at: 2026-10-31
+  - id: CVE-2026-45447
+    statement: same as CVE-2026-31789
+    expired_at: 2026-10-31

@@ -1,0 +1,41 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyOutsideIndia",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*", "organizations:*", "sts:*", "support:*", "budgets:*", "ce:*",
+        "cloudfront:*", "route53:*", "route53domains:*", "wafv2:*", "acm:*",
+        "health:*", "trustedadvisor:*", "account:*", "globalaccelerator:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": ["ap-south-1", "ap-south-2"]
+        }
+      }
+    },
+    {
+      "Sid": "EdgeServicesOnlyInUsEast1",
+      "Effect": "Deny",
+      "Action": ["acm:*", "wafv2:*"],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": ["ap-south-1", "ap-south-2", "us-east-1"]
+        }
+      }
+    },
+    {
+      "Sid": "ProtectAuditTrail",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:StopLogging", "cloudtrail:DeleteTrail", "cloudtrail:UpdateTrail",
+        "guardduty:DeleteDetector", "guardduty:DisassociateFromMasterAccount",
+        "config:StopConfigurationRecorder", "config:DeleteConfigurationRecorder"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

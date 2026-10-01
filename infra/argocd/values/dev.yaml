@@ -1,0 +1,43 @@
+# Dev: smallest footprint, chaos controls enabled, synthetic data only.
+# Account IDs and ARNs are placeholders until Terraform outputs exist (see infra/terraform).
+global:
+  environment: dev
+  domain: dev.tally.example
+  image:
+    registry: 111111111111.dkr.ecr.ap-south-1.amazonaws.com
+    tag: main
+serviceAccounts:
+  roleArns:
+    core: arn:aws:iam::111111111111:role/tally-dev-core
+    core-worker: arn:aws:iam::111111111111:role/tally-dev-core
+    recon: arn:aws:iam::111111111111:role/tally-dev-recon
+    vault: arn:aws:iam::111111111111:role/tally-dev-vault
+    backoffice: arn:aws:iam::111111111111:role/tally-dev-backoffice
+    jobs: arn:aws:iam::111111111111:role/tally-dev-jobs
+secrets:
+  prefix: tally/dev
+config:
+  TALLY_KAFKA_BOOTSTRAP: b-1.tally-dev.kafka.internal:9096,b-2.tally-dev.kafka.internal:9096
+  TALLY_S3_BUCKET: tally-dev-objects
+  TALLY_CONSOLE_ORIGINS: https://console.dev.tally.example
+  TALLY_VAULT_CORS_ORIGINS: https://console.dev.tally.example
+podDefaults:
+  topologySpread: false
+workloads:
+  core: {hpa: {min: 2, max: 4}, pdb: {minAvailable: 1}}
+  core-worker: {replicas: 1, pdb: {minAvailable: null, maxUnavailable: 1}}
+  ledger: {hpa: {min: 2, max: 4}, pdb: {minAvailable: 1}}
+  vault: {hpa: {min: 1, max: 2}, pdb: {minAvailable: null, maxUnavailable: 1}}
+  risk: {hpa: {min: 1, max: 3}, pdb: {minAvailable: null, maxUnavailable: 1}}
+  backoffice:
+    env: {TALLY_CHAOS_CONTROL: "1"}
+    hpa: {min: 1, max: 2}
+    pdb: {minAvailable: null, maxUnavailable: 1}
+  web: {hpa: {min: 1, max: 2}, pdb: {minAvailable: null, maxUnavailable: 1}}
+rollouts:
+  steps:
+    - setWeight: 50
+    - pause: {duration: 2m}
+ingress:
+  certificateArn: arn:aws:acm:ap-south-1:111111111111:certificate/dev-placeholder
+  wafAclArn: arn:aws:wafv2:ap-south-1:111111111111:regional/webacl/tally-dev/placeholder

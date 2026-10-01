@@ -172,10 +172,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async def verifier() -> None:
         while True:
-            try:
-                await run_integrity_check(pool)
-            except (asyncpg.PostgresError, OSError):
-                LEDGER_INTEGRITY_OK.labels("verifier_available").set(0)
+            await verify_once(pool)
             await asyncio.sleep(interval)
 
     task = asyncio.create_task(verifier())
@@ -201,6 +198,18 @@ def _measured(operation: str) -> Iterator[None]:
         LEDGER_POSTS.labels(operation, "ok").inc()
     finally:
         LEDGER_POST_LATENCY.labels(operation).observe(time.perf_counter() - started)
+
+
+async def verify_once(pool: asyncpg.Pool) -> None:
+    """One verifier cycle. An unreachable database reports ``verifier_available=0`` and a later
+    successful run clears it; otherwise one blip at start-up would page forever and block every
+    canary although the ledger is intact (found by the Kubernetes canary drill)."""
+    try:
+        await run_integrity_check(pool)
+    except (asyncpg.PostgresError, OSError):
+        LEDGER_INTEGRITY_OK.labels("verifier_available").set(0)
+    else:
+        LEDGER_INTEGRITY_OK.labels("verifier_available").set(1)
 
 
 async def run_integrity_check(pool: asyncpg.Pool) -> bool:

@@ -1,0 +1,118 @@
+{{- define "tally.jobPod" -}}
+metadata:
+  labels:
+    {{- include "tally.labels" (dict "root" .root "name" "") | nindent 4 }}
+    tally.io/job: "true"
+    tally.io/job-name: {{ .job }}
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ .sa }}
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: {{ .job }}
+      image: {{ include "tally.image" (dict "root" .root "kind" "python") }}
+      imagePullPolicy: {{ .root.Values.global.image.pullPolicy }}
+      command: [python, -m, {{ .module }}]
+      args:
+        {{- range .args }}
+        - {{ . }}
+        {{- end }}
+      envFrom:
+        {{- if .config }}
+        # Hooks (migrations) run before the release's ConfigMap exists; they need only secrets.
+        - configMapRef: {name: tally-config}
+        {{- end }}
+        - secretRef: {name: {{ include "tally.secretName" .secret }}}
+      env:
+        - {name: AWS_REGION, value: {{ .root.Values.global.region }}}
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits: {memory: 512Mi}
+      securityContext:
+        {{- include "tally.securityContext" . | nindent 8 }}
+      volumeMounts:
+        - {name: tmp, mountPath: /tmp}
+  volumes:
+    - name: tmp
+      emptyDir: {sizeLimit: 64Mi, medium: Memory}
+{{- end -}}
+{{- if .Values.migrations.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tally-migrate
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "-2"
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-2"
+    helm.sh/hook-delete-policy: before-hook-creation
+automountServiceAccountToken: false
+---
+# Migrations are forward-only and additive, so the old and new versions can both run against
+# the migrated schema while a canary is in progress (expand/contract; see ADR-019).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tally-migrate
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    {{- include "tally.jobPod" (dict "root" $ "job" "migrate" "sa" "tally-migrate" "module" "scripts.migrate" "args" .Values.migrations.services "secret" "migrate") | nindent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tally-jobs
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+  {{- with (index .Values.serviceAccounts.roleArns "jobs") }}
+  annotations:
+    eks.amazonaws.com/role-arn: {{ . }}
+  {{- end }}
+automountServiceAccountToken: false
+{{- range $name, $job := .Values.cronJobs }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tally-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+spec:
+  schedule: {{ $job.schedule | quote }}
+  timeZone: Asia/Kolkata
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        {{- include "tally.jobPod" (dict "root" $ "job" $name "sa" "tally-jobs" "module" "services.workers.scheduled" "args" $job.args "secret" "jobs" "config" true) | nindent 8 }}
+{{- end }}

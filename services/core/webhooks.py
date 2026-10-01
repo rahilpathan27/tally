@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import secrets
 import time
 from collections.abc import Callable, Sequence
@@ -131,6 +132,26 @@ class EventPublisher(Protocol):
     async def publish(self, events: list[dict[str, object]]) -> None: ...
 
 
+def kafka_security_from_env() -> dict[str, Any]:
+    """PLAINTEXT locally; SASL_SSL with SCRAM-SHA-512 against MSK (TLS in transit)."""
+    protocol = os.environ.get("TALLY_KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
+    if protocol == "PLAINTEXT":
+        return {}
+    import ssl
+
+    options: dict[str, Any] = {
+        "security_protocol": protocol,
+        "ssl_context": ssl.create_default_context(),
+    }
+    if protocol == "SASL_SSL":
+        options |= {
+            "sasl_mechanism": "SCRAM-SHA-512",
+            "sasl_plain_username": os.environ["TALLY_KAFKA_USERNAME"],
+            "sasl_plain_password": os.environ["TALLY_KAFKA_PASSWORD"],
+        }
+    return options
+
+
 class KafkaPublisher:
     """Idempotent Kafka producer; consumers deduplicate on the envelope ``id``."""
 
@@ -139,7 +160,10 @@ class KafkaPublisher:
 
         self.topic = topic
         self._producer: Any = AIOKafkaProducer(
-            bootstrap_servers=bootstrap_servers, enable_idempotence=True, acks="all"
+            bootstrap_servers=bootstrap_servers,
+            enable_idempotence=True,
+            acks="all",
+            **kafka_security_from_env(),
         )
         self._started = False
 

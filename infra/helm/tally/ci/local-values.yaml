@@ -1,0 +1,51 @@
+# Local minikube drill (scripts/k8s_local.sh). Secrets are generated per run into
+# .data/k8s-local/secrets.yaml and passed with -f; nothing secret lives in this file.
+global:
+  environment: local
+  image:
+    registry: ""
+    tag: drill
+    pullPolicy: Never
+  otlpEndpoint: ""
+  # Calico pod CIDR: the in-cluster Postgres/Redis stand in for the AWS data subnets.
+  dataCidrs: ["10.244.0.0/16"]
+  endpointCidrs: ["10.244.0.0/16"]
+  albCidrs: ["10.244.0.0/16"]
+secrets:
+  provider: inline
+config:
+  TALLY_KAFKA_BOOTSTRAP: ""
+  TALLY_KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+  TALLY_S3_BUCKET: ""
+  TALLY_OBJECT_DIR: /tmp/objects
+  TALLY_CONSOLE_ORIGINS: http://localhost:3000
+  TALLY_VAULT_CORS_ORIGINS: http://localhost:3000
+  LEDGER_VERIFY_INTERVAL_SECONDS: "15"
+podDefaults:
+  topologySpread: false
+  terminationGracePeriodSeconds: 10
+smallResources: &small {requests: {cpu: 50m, memory: 160Mi}, limits: {memory: 512Mi}}
+workloads:
+  core: {hpa: null, replicas: 2, pdb: {minAvailable: 1}, resources: *small}
+  core-worker: {replicas: 1, pdb: null, resources: *small}
+  ledger: {hpa: null, replicas: 2, pdb: {minAvailable: 1}, resources: *small}
+  vault: {hpa: null, replicas: 1, pdb: null, resources: *small}
+  risk: {hpa: null, replicas: 1, pdb: null, resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}}
+  recon: {replicas: 1, pdb: null, resources: *small}
+  backoffice: {hpa: null, replicas: 1, pdb: null, resources: *small}
+  web: {enabled: false}
+  bank-sim: {resources: *small}
+  payer-psp-sim: {resources: *small}
+  network-sim: {resources: *small}
+rollouts:
+  steps:
+    - setWeight: 50
+    - pause: {duration: 4m}
+  analysis:
+    prometheusAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+    interval: 30s
+ingress:
+  enabled: false
+monitoring:
+  serviceMonitor: false
+  prometheusRule: false

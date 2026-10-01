@@ -5,12 +5,14 @@ export function proxy(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const isDev = process.env.NODE_ENV === "development";
   const vault = process.env.NEXT_PUBLIC_VAULT_URL ?? "http://127.0.0.1:8002";
+  // In AWS, hashed /_next/static assets are served from a CloudFront origin (no user data).
+  const assets = process.env.NEXT_PUBLIC_ASSET_ORIGIN ? ` ${process.env.NEXT_PUBLIC_ASSET_ORIGIN}` : "";
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
-    `style-src 'self'${isDev ? " 'unsafe-inline'" : ` 'nonce-${nonce}'`}`,
-    "img-src 'self' blob: data:",
-    "font-src 'self'",
+    `script-src 'self'${assets} 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
+    `style-src 'self'${assets}${isDev ? " 'unsafe-inline'" : ` 'nonce-${nonce}'`}`,
+    `img-src 'self'${assets} blob: data:`,
+    `font-src 'self'${assets}`,
     `connect-src 'self' ${vault}${isDev ? " ws:" : ""}`,
     "object-src 'none'",
     "base-uri 'self'",

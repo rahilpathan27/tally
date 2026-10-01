@@ -1,0 +1,201 @@
+# Throwaway dependencies for the local canary drill (minikube profile "tally"). In AWS these
+# are RDS, ElastiCache and kube-prometheus-stack; here they are single pods with no persistence.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tally-deps
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: tally-deps
+data:
+  init.sql: |
+    CREATE DATABASE tally_ledger;
+    CREATE DATABASE tally_vault;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: tally-deps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - {name: POSTGRES_USER, value: tally}
+            - {name: POSTGRES_DB, value: tally}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: postgres, key: password}
+          ports:
+            - containerPort: 5432
+          args: ["-c", "max_connections=300"]
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, tally]
+            periodSeconds: 3
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {memory: 768Mi}
+          volumeMounts:
+            - {name: init, mountPath: /docker-entrypoint-initdb.d}
+      volumes:
+        - name: init
+          configMap: {name: postgres-init}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: tally-deps
+spec:
+  selector: {app: postgres}
+  ports:
+    - port: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: tally-deps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: redis}
+  template:
+    metadata:
+      labels: {app: redis}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: tally-deps
+spec:
+  selector: {app: redis}
+  ports:
+    - port: 6379
+---
+# Prometheus scrapes every tally pod (as a ServiceMonitor would) and is what Argo Rollouts'
+# AnalysisTemplates query. The `pod` label matches what the Prometheus Operator adds.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tally-local-prometheus
+rules:
+  - apiGroups: [""]
+    resources: [pods, endpoints, services]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tally-local-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tally-local-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+      evaluation_interval: 10s
+    scrape_configs:
+      - job_name: tally
+        honor_labels: true
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: [tally-local]}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_part_of]
+            regex: tally
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: http
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-prometheus-stack-prometheus
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: prometheus}
+  template:
+    metadata:
+      labels: {app: prometheus}
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.5.0
+          args: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=6h]
+          ports:
+            - containerPort: 9090
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-prometheus-stack-prometheus
+  namespace: monitoring
+spec:
+  selector: {app: prometheus}
+  ports:
+    - port: 9090

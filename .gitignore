@@ -27,3 +27,11 @@ ml/artifacts/*
 web/console/test-results/
 web/console/playwright-report/
 web/console/next-env.d.ts
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl.bak

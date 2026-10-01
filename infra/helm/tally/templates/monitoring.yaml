@@ -1,0 +1,33 @@
+{{- if .Values.monitoring.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tally
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+    {{- toYaml .Values.monitoring.labels | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: tally
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      # Tally series carry their own service label; keep it instead of renaming it.
+      honorLabels: true
+{{- end }}
+{{- if .Values.monitoring.prometheusRule }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tally-alerts
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+    {{- toYaml .Values.monitoring.labels | nindent 4 }}
+spec:
+  {{- .Files.Get "files/tally-alerts.yml" | nindent 2 }}
+{{- end }}

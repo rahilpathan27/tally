@@ -1,0 +1,41 @@
+# "prod" is the production-shaped environment of a simulation: synthetic counterparties only,
+# no real money. Images must be referenced by signed digest (Kyverno enforces it).
+global:
+  environment: prod
+  domain: tally.example
+  image:
+    registry: 333333333333.dkr.ecr.ap-south-1.amazonaws.com
+    tag: main
+    pythonDigest: ""   # set by the promotion PR (sha256:...)
+    webDigest: ""
+serviceAccounts:
+  roleArns:
+    core: arn:aws:iam::333333333333:role/tally-prod-core
+    core-worker: arn:aws:iam::333333333333:role/tally-prod-core
+    recon: arn:aws:iam::333333333333:role/tally-prod-recon
+    vault: arn:aws:iam::333333333333:role/tally-prod-vault
+    backoffice: arn:aws:iam::333333333333:role/tally-prod-backoffice
+    jobs: arn:aws:iam::333333333333:role/tally-prod-jobs
+secrets:
+  prefix: tally/prod
+config:
+  TALLY_KAFKA_BOOTSTRAP: b-1.tally-prod.kafka.internal:9096,b-2.tally-prod.kafka.internal:9096,b-3.tally-prod.kafka.internal:9096
+  TALLY_S3_BUCKET: tally-prod-objects
+  TALLY_CONSOLE_ORIGINS: https://console.tally.example
+  TALLY_VAULT_CORS_ORIGINS: https://console.tally.example
+workloads:
+  core-worker: {replicas: 3, pdb: {minAvailable: 2}}
+  recon: {replicas: 2, pdb: {maxUnavailable: null, minAvailable: 1}}
+rollouts:
+  steps:
+    - setWeight: 5
+    - pause: {duration: 5m}
+    - setWeight: 25
+    - pause: {duration: 10m}
+    - setWeight: 50
+    - pause: {duration: 10m}
+    # Final promotion to 100% needs an explicit `kubectl argo rollouts promote`.
+    - pause: {}
+ingress:
+  certificateArn: arn:aws:acm:ap-south-1:333333333333:certificate/prod-placeholder
+  wafAclArn: arn:aws:wafv2:ap-south-1:333333333333:regional/webacl/tally-prod/placeholder

@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars (git-ignored). No credentials go here: authenticate with SSO/OIDC.
+account_id = "000000000000"
+region     = "ap-south-1"

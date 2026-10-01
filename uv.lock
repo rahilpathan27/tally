@@ -1945,6 +1945,7 @@ dependencies = [
     { name = "boto3" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "lightgbm" },
     { name = "numpy" },
     { name = "onnx" },
@@ -1966,7 +1967,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "hypothesis" },
     { name = "mutmut" },
     { name = "mypy" },
@@ -1981,6 +1981,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.43.105" },
     { name = "cryptography", specifier = ">=44.0" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "lightgbm", specifier = ">=4.7.0" },
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "onnx", specifier = ">=1.23.1" },
@@ -2002,7 +2003,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27" },
     { name = "hypothesis", specifier = ">=6.112" },
     { name = "mutmut", specifier = ">=3.7,<4" },
     { name = "mypy", specifier = ">=1.11" },

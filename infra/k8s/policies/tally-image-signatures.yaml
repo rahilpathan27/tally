@@ -1,0 +1,35 @@
+# Images are signed keylessly by the CI workflow (GitHub OIDC -> Sigstore Fulcio) and carry an
+# SPDX SBOM attestation. Unsigned or foreign-signed images are rejected.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tally-verify-image-signatures
+spec:
+  validationFailureAction: Enforce
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: cosign-keyless
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [tally-staging, tally-prod]
+      verifyImages:
+        - imageReferences: ["*.dkr.ecr.ap-south-1.amazonaws.com/tally/*"]
+          mutateDigest: false
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: https://token.actions.githubusercontent.com
+                    subject: "https://github.com/rahilpathan27/tally/.github/workflows/release.yml@refs/heads/main"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          attestations:
+            - type: https://spdx.dev/Document
+              attestors:
+                - entries:
+                    - keyless:
+                        issuer: https://token.actions.githubusercontent.com
+                        subject: "https://github.com/rahilpathan27/tally/.github/workflows/release.yml@refs/heads/main"

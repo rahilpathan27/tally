@@ -1,0 +1,271 @@
+# Tally umbrella chart. Every workload shares one of two images:
+#   python: all Python services, workers and jobs (the command selects the module)
+#   web:    the Next.js console (distroless Node)
+# Environment overlays live in infra/argocd/values/<env>.yaml.
+
+global:
+  environment: dev
+  region: ap-south-1
+  domain: tally.example
+  image:
+    registry: ""             # e.g. <account>.dkr.ecr.ap-south-1.amazonaws.com (empty = local)
+    python: tally/python
+    web: tally/web
+    tag: dev
+    # Prefer digests in staging/prod: Kyverno verifies cosign signatures per digest.
+    pythonDigest: ""
+    webDigest: ""
+    pullPolicy: IfNotPresent
+  otlpEndpoint: http://otel-collector.observability.svc:4318
+  # CIDRs of the data subnets (RDS, ElastiCache, MSK). NetworkPolicies allow egress only there.
+  dataCidrs: ["10.40.64.0/20", "10.40.80.0/20", "10.40.96.0/20"]
+  # CIDR for HTTPS egress to VPC interface endpoints (S3/KMS/STS/Secrets Manager).
+  endpointCidrs: ["10.40.0.0/16"]
+  # ALB (target-type ip) forwards from its ENIs in the public subnets.
+  albCidrs: ["10.40.0.0/22", "10.40.4.0/22", "10.40.8.0/22"]
+  monitoringNamespace: monitoring
+  observabilityNamespace: observability
+
+serviceAccounts:
+  # IRSA role ARNs per workload (Terraform output `irsa_role_arns`). Empty = no annotation.
+  roleArns: {}
+
+secrets:
+  # external: External Secrets Operator pulls from AWS Secrets Manager (every real environment).
+  # inline:   a plain Secret from `inlineValues` (throwaway local clusters only; Kyverno blocks it
+  #           in staging and prod).
+  provider: external
+  secretStore: tally-aws-secrets
+  refreshInterval: 1h
+  prefix: tally/dev
+  inlineValues: {}
+
+# Non-secret configuration shared by every Python workload. Connection strings that embed
+# credentials (database URLs, REDIS_URL with its auth token) are secrets, not config.
+config:
+  TALLY_KAFKA_BOOTSTRAP: tally-msk.internal:9096
+  TALLY_KAFKA_SECURITY_PROTOCOL: SASL_SSL
+  TALLY_S3_BUCKET: tally-dev-objects
+  TALLY_CONSOLE_ORIGINS: https://console.tally.example
+  TALLY_VAULT_CORS_ORIGINS: https://console.tally.example
+  TALLY_WEBHOOK_TRUSTED_HOSTS: ""
+  LEDGER_VERIFY_INTERVAL_SECONDS: "60"
+  TALLY_MODEL_DIR: ml/artifacts/fraud-gbm-v1
+  # Public network test cards; the vault refuses to tokenize anything else (synthetic only).
+  TALLY_VAULT_TEST_PANS: "4242424242424242,5555555555554444,378282246310005"
+
+podDefaults:
+  terminationGracePeriodSeconds: 30
+  topologySpread: true
+
+# Workloads. `kind` is Deployment or Rollout (Argo Rollouts canary with analysis).
+# `calls` drives both service URLs and NetworkPolicy egress; `stores` opens data-store egress.
+# `secretKeys` are the env vars pulled from Secrets Manager (<prefix>/<name>).
+workloads:
+  core:
+    kind: Rollout
+    image: python
+    command: [uvicorn, services.core.api:app]
+    port: 8000
+    replicas: 3
+    hpa: {min: 3, max: 12, cpu: 65}
+    pdb: {minAvailable: 2}
+    resources: {requests: {cpu: 500m, memory: 512Mi}, limits: {memory: 1Gi}}
+    env: {TALLY_BACKGROUND_WORKERS: "0"}
+    calls: [ledger, risk, bank-sim, payer-psp-sim, network-sim]
+    stores: [postgres, redis, kafka, https]
+    public: true
+    readiness: /health/ready
+    secretKeys: [TALLY_DATABASE_URL, REDIS_URL, TALLY_INTERNAL_KEY, TALLY_RECOVERY_KEY,
+                 TALLY_LEDGER_INTERNAL_KEY, TALLY_API_KEY_ENCRYPTION_KEY, TALLY_STEP_UP_SECRET,
+                 TALLY_NETWORK_SIMULATOR_KEY, TALLY_KAFKA_USERNAME, TALLY_KAFKA_PASSWORD]
+  core-worker:
+    # Same image and code as core; runs the recovery, settlement, webhook and metrics loops.
+    # Payment recovery claims rows with leases and money operations take per-merchant advisory
+    # locks, so more than one replica is safe.
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.core.api:app]
+    port: 8000
+    replicas: 2
+    pdb: {minAvailable: 1}
+    resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {memory: 1Gi}}
+    env: {TALLY_BACKGROUND_WORKERS: "1"}
+    calls: [ledger, risk, bank-sim, payer-psp-sim, network-sim]
+    stores: [postgres, redis, kafka, https]
+    readiness: /health/ready
+    secretKeys: [TALLY_DATABASE_URL, REDIS_URL, TALLY_INTERNAL_KEY, TALLY_RECOVERY_KEY,
+                 TALLY_LEDGER_INTERNAL_KEY, TALLY_API_KEY_ENCRYPTION_KEY, TALLY_STEP_UP_SECRET,
+                 TALLY_NETWORK_SIMULATOR_KEY, TALLY_KAFKA_USERNAME, TALLY_KAFKA_PASSWORD]
+  ledger:
+    kind: Rollout
+    image: python
+    command: [uvicorn, services.ledger.api:app]
+    port: 8001
+    replicas: 3
+    hpa: {min: 3, max: 8, cpu: 65}
+    pdb: {minAvailable: 2}
+    resources: {requests: {cpu: 500m, memory: 384Mi}, limits: {memory: 768Mi}}
+    stores: [postgres]
+    readiness: /health/ready
+    secretKeys: [LEDGER_DATABASE_URL, LEDGER_PROVISIONING_KEY]
+  vault:
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.vault.api:app]
+    port: 8002
+    replicas: 2
+    hpa: {min: 2, max: 6, cpu: 65}
+    pdb: {minAvailable: 1}
+    resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {memory: 512Mi}}
+    stores: [postgres, https]
+    public: true
+    readiness: /health/ready
+    secretKeys: [VAULT_DATABASE_URL, TALLY_VAULT_KEK_B64, TALLY_VAULT_TOKENIZE_KEY,
+                 TALLY_VAULT_NETWORK_KEY, TALLY_VAULT_PUBLISHABLE_KEYS]
+  risk:
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.risk.api:app]
+    port: 8030
+    replicas: 2
+    hpa: {min: 2, max: 10, cpu: 60}
+    pdb: {minAvailable: 1}
+    resources: {requests: {cpu: 500m, memory: 768Mi}, limits: {memory: 1536Mi}}
+    calls: [core]
+    stores: [postgres, redis]
+    secretKeys: [TALLY_DATABASE_URL, REDIS_URL, TALLY_INTERNAL_KEY, TALLY_RECOVERY_KEY,
+                 TALLY_STEP_UP_SECRET]
+  recon:
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.recon.api:app]
+    port: 8020
+    replicas: 1
+    pdb: {maxUnavailable: 1}
+    resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {memory: 2Gi}}
+    calls: [ledger, bank-sim]
+    stores: [postgres, https]
+    secretKeys: [TALLY_DATABASE_URL, TALLY_INTERNAL_KEY]
+  backoffice:
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.backoffice_api.app:app]
+    port: 8040
+    replicas: 2
+    hpa: {min: 2, max: 6, cpu: 65}
+    pdb: {minAvailable: 1}
+    resources: {requests: {cpu: 250m, memory: 384Mi}, limits: {memory: 768Mi}}
+    env: {TALLY_CHAOS_CONTROL: "0"}
+    calls: [core, ledger, risk, recon, bank-sim, payer-psp-sim, network-sim]
+    stores: [postgres, redis, https]
+    public: true
+    secretKeys: [TALLY_DATABASE_URL, REDIS_URL, TALLY_INTERNAL_KEY, TALLY_RECOVERY_KEY,
+                 TALLY_API_KEY_ENCRYPTION_KEY, TALLY_BACKOFFICE_SECRET_KEY,
+                 TALLY_SIMULATOR_ADMIN_KEY]
+  web:
+    kind: Deployment
+    image: web
+    port: 3000
+    replicas: 2
+    hpa: {min: 2, max: 6, cpu: 70}
+    pdb: {minAvailable: 1}
+    resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {memory: 512Mi}}
+    calls: [core, risk, backoffice]
+    public: true
+    liveness: /login
+    readiness: /login
+    secretKeys: [TALLY_DEMO_KEY_ID, TALLY_DEMO_SECRET_B64, TALLY_RISK_INTERNAL_KEY]
+  # Synthetic counterparties. There are no real banks or card networks behind Tally.
+  bank-sim:
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.simulators.bank.api:app]
+    port: 8010
+    replicas: 1
+    resources: {requests: {cpu: 100m, memory: 192Mi}, limits: {memory: 384Mi}}
+    secretKeys: [TALLY_SIMULATOR_ADMIN_KEY]
+  payer-psp-sim:
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.simulators.payer_psp.api:app]
+    port: 8011
+    replicas: 1
+    resources: {requests: {cpu: 100m, memory: 192Mi}, limits: {memory: 384Mi}}
+    secretKeys: [TALLY_SIMULATOR_ADMIN_KEY]
+  network-sim:
+    kind: Deployment
+    image: python
+    command: [uvicorn, services.simulators.network.api:app]
+    port: 8012
+    replicas: 1
+    resources: {requests: {cpu: 100m, memory: 192Mi}, limits: {memory: 384Mi}}
+    calls: [vault]
+    secretKeys: [TALLY_SIMULATOR_ADMIN_KEY, TALLY_NETWORK_SIMULATOR_KEY,
+                 TALLY_VAULT_NETWORK_KEY]
+
+# URL env var each workload receives for a peer it `calls`.
+peerEnv:
+  core: TALLY_CORE_URL
+  ledger: TALLY_LEDGER_URL
+  risk: TALLY_RISK_URL
+  recon: TALLY_RECON_URL
+  vault: TALLY_VAULT_URL
+  backoffice: TALLY_BFF_URL
+  bank-sim: TALLY_BANK_SIM_URL
+  payer-psp-sim: TALLY_PAYER_PSP_URL
+  network-sim: TALLY_CARD_NETWORK_URL
+
+storePorts:
+  postgres: [5432]
+  redis: [6379]
+  kafka: [9096]
+  https: [443]
+
+migrations:
+  enabled: true
+  # Order matters: gateway before core (core tables reference gateway ones).
+  services: [ledger, gateway, core, vault, recon, risk, backoffice]
+  secretKeys: [TALLY_DATABASE_URL, LEDGER_DATABASE_URL, VAULT_DATABASE_URL]
+  activeDeadlineSeconds: 600
+
+cronJobs:
+  aml: {schedule: "*/15 * * * *", args: [aml]}
+  audit-anchor: {schedule: "5 * * * *", args: [audit-anchor]}
+  verify-anchors: {schedule: "35 */6 * * *", args: [verify-anchors]}
+cronSecretKeys: [TALLY_DATABASE_URL]
+
+rollouts:
+  steps:
+    - setWeight: 10
+    - pause: {duration: 3m}
+    - setWeight: 25
+    - pause: {duration: 5m}
+    - setWeight: 50
+    - pause: {duration: 5m}
+  analysis:
+    prometheusAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+    interval: 1m
+    # Canary 5xx ratio on merchant routes must stay below this.
+    maxErrorRatio: "0.01"
+    maxP99Seconds: "1.5"
+
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  certificateArn: ""
+  wafAclArn: ""
+  hosts:
+    api: api        # merchant API -> core
+    console: console  # web + /auth,/bff -> backoffice (same origin)
+    vault: vault    # public tokenization only
+
+monitoring:
+  serviceMonitor: true
+  prometheusRule: true
+  labels: {release: kube-prometheus-stack}

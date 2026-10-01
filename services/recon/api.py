@@ -20,7 +20,7 @@ import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from libs.common.object_store import FilesystemObjectStore, S3ObjectStore
+from libs.common.object_store import FilesystemObjectStore, s3_store_from_env
 from libs.observability.metrics import instrument
 from libs.observability.tracing import configure_tracing
 from libs.security.http import SecurityMiddleware
@@ -125,16 +125,9 @@ def create_app(ctx: ReconContext | None = None, internal_key: str | None = None)
         ledger_http = httpx.AsyncClient(
             base_url=os.environ.get("TALLY_LEDGER_URL", "http://127.0.0.1:8001"), timeout=30
         )
-        store: Any
-        if os.environ.get("TALLY_S3_ENDPOINT"):
-            store = S3ObjectStore(
-                os.environ.get("TALLY_S3_BUCKET", "tally-local"),
-                endpoint_url=os.environ["TALLY_S3_ENDPOINT"],
-                access_key=os.environ.get("TALLY_S3_ACCESS_KEY", "local"),
-                secret_key=os.environ.get("TALLY_S3_SECRET_KEY", "local"),
-            )
-        else:
-            store = FilesystemObjectStore(Path(os.environ.get("TALLY_OBJECT_DIR", ".data/objects")))
+        store: Any = s3_store_from_env() or FilesystemObjectStore(
+            Path(os.environ.get("TALLY_OBJECT_DIR", ".data/objects"))
+        )
         app.state.recon_ctx = ReconContext(pool, ledger_http, store, ReconConfig())
         app.state.internal_key = os.environ.get("TALLY_INTERNAL_KEY", "")
         app.state.bank_http = httpx.AsyncClient(

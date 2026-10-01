@@ -1,0 +1,27 @@
+# Staging mirrors production topology at lower scale; images are pinned by digest.
+global:
+  environment: staging
+  domain: staging.tally.example
+  image:
+    registry: 222222222222.dkr.ecr.ap-south-1.amazonaws.com
+    tag: main
+    pythonDigest: ""   # set by CI promotion (sha256:...)
+    webDigest: ""
+serviceAccounts:
+  roleArns:
+    core: arn:aws:iam::222222222222:role/tally-staging-core
+    core-worker: arn:aws:iam::222222222222:role/tally-staging-core
+    recon: arn:aws:iam::222222222222:role/tally-staging-recon
+    vault: arn:aws:iam::222222222222:role/tally-staging-vault
+    backoffice: arn:aws:iam::222222222222:role/tally-staging-backoffice
+    jobs: arn:aws:iam::222222222222:role/tally-staging-jobs
+secrets:
+  prefix: tally/staging
+config:
+  TALLY_KAFKA_BOOTSTRAP: b-1.tally-staging.kafka.internal:9096,b-2.tally-staging.kafka.internal:9096,b-3.tally-staging.kafka.internal:9096
+  TALLY_S3_BUCKET: tally-staging-objects
+  TALLY_CONSOLE_ORIGINS: https://console.staging.tally.example
+  TALLY_VAULT_CORS_ORIGINS: https://console.staging.tally.example
+ingress:
+  certificateArn: arn:aws:acm:ap-south-1:222222222222:certificate/staging-placeholder
+  wafAclArn: arn:aws:wafv2:ap-south-1:222222222222:regional/webacl/tally-staging/placeholder

@@ -51,3 +51,57 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker run --rm -v "$PWD/infra/observability/prometheus/rules:/rules" --entrypoint promtool prom/prometheus:v3.5.0 check rules /rules/tally-alerts.yml
       - run: docker run --rm -v "$PWD/infra/observability/prometheus/rules:/rules" --entrypoint promtool prom/prometheus:v3.5.0 test rules /rules/tally-alerts.test.yml
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans the full history
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: cd web/console && npm ci
+      - run: STAGES="gitleaks semgrep pip-audit npm-audit" scripts/security_scan.sh
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Chart ships the same alert rules Prometheus is tested with
+        run: diff -u infra/observability/prometheus/rules/tally-alerts.yml infra/helm/tally/files/tally-alerts.yml
+      - run: scripts/check_infra.sh
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Python image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/python.Dockerfile
+          tags: tally/python:ci
+          load: true
+          cache-from: type=gha,scope=python
+          cache-to: type=gha,scope=python,mode=max
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/web.Dockerfile
+          tags: tally/web:ci
+          load: true
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+      - name: Image smoke test (non-root, read-only root filesystem)
+        run: |
+          docker run --rm --read-only --tmpfs /tmp tally/python:ci python -c "import services.core.api, services.ledger.api, services.risk.api, services.vault.api"
+          test "$(docker run --rm tally/python:ci id -u)" = "10001"
+      - run: PY_IMAGE=tally/python:ci WEB_IMAGE=tally/web:ci STAGES="trivy-image sbom" scripts/security_scan.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: .data/sbom/

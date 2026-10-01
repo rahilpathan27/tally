@@ -1,0 +1,58 @@
+# Builds, pushes, signs and attests images on main. Needs an AWS account: set the repository
+# variables AWS_RELEASE_ROLE_ARN (Terraform output ci_release_role_arn) and ECR_REGISTRY.
+# Without them the workflow does nothing, so forks and this simulation's CI stay green.
+# Kyverno (infra/k8s/policies/tally-image-signatures.yaml) only admits images signed by this
+# exact workflow file on refs/heads/main.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    if: ${{ vars.AWS_RELEASE_ROLE_ARN != '' && vars.ECR_REGISTRY != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC to AWS and to Sigstore; no long-lived credentials anywhere
+    strategy:
+      matrix:
+        image:
+          - {name: tally/python, file: deploy/docker/python.Dockerfile}
+          - {name: tally/web, file: deploy/docker/web.Dockerfile}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ap-south-1
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v3
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.file }}
+          push: true
+          # ECR tags are immutable: the commit SHA names exactly one digest forever.
+          tags: ${{ vars.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ github.sha }}
+          provenance: mode=max
+          sbom: false
+      - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ${{ vars.ECR_REGISTRY }}/${{ matrix.image.name }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - name: Sign and attest (keyless)
+        env:
+          REF: ${{ vars.ECR_REGISTRY }}/${{ matrix.image.name }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$REF"
+      - name: Record digest for promotion
+        run: echo "${{ matrix.image.name }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

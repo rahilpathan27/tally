@@ -1,0 +1,15 @@
+# gitleaks: default rules, plus an allow-list for deliberately fake, documented test values.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic local-only credentials and test fixtures"
+paths = [
+  '''^sources/''',
+  '''^web/console/package-lock\.json$''',
+  '''^ml/artifacts/''',
+]
+regexes = [
+  '''tally-local-only''',
+  '''pk_test_tally_[a-z]+''',
+]

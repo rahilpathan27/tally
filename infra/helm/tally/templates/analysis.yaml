@@ -1,0 +1,78 @@
+{{- $a := .Values.rollouts.analysis }}
+# Canary pods are named tally-<service>-<pod-template-hash>-<suffix>; each template compares the
+# canary's own series against the thresholds.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: tally-canary-errors
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+spec:
+  args:
+    - name: service
+    - name: canary-hash
+  metrics:
+    - name: error-ratio
+      interval: {{ $a.interval }}
+      count: 0
+      failureLimit: 1
+      # No traffic yet is inconclusive rather than a pass.
+      successCondition: len(result) > 0 && result[0] < {{ $a.maxErrorRatio }}
+      failureCondition: len(result) > 0 && result[0] >= {{ $a.maxErrorRatio }}
+      inconclusiveLimit: 5
+      provider:
+        prometheus:
+          address: {{ $a.prometheusAddress }}
+          # `or vector(0)`: with traffic and no 5xx the numerator has no series at all, which
+          # would make the ratio empty (inconclusive) instead of 0. Found by the local drill.
+          query: |
+            (sum(rate(tally_http_requests_total{service="{{`{{args.service}}`}}",status=~"5..",pod=~"tally-{{`{{args.service}}`}}-{{`{{args.canary-hash}}`}}-.*"}[2m])) or vector(0))
+            /
+            sum(rate(tally_http_requests_total{service="{{`{{args.service}}`}}",pod=~"tally-{{`{{args.service}}`}}-{{`{{args.canary-hash}}`}}-.*"}[2m]))
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: tally-canary-latency
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+spec:
+  args:
+    - name: service
+    - name: canary-hash
+  metrics:
+    - name: p99-latency
+      interval: {{ $a.interval }}
+      count: 0
+      failureLimit: 2
+      successCondition: len(result) == 0 || isNaN(result[0]) || result[0] < {{ $a.maxP99Seconds }}
+      provider:
+        prometheus:
+          address: {{ $a.prometheusAddress }}
+          query: |
+            histogram_quantile(0.99, sum by (le) (rate(tally_http_request_duration_seconds_bucket{service="{{`{{args.service}}`}}",pod=~"tally-{{`{{args.service}}`}}-{{`{{args.canary-hash}}`}}-.*"}[2m])))
+---
+# Money safety gate: any ledger invariant failure during a canary aborts it immediately.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: tally-ledger-integrity
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+spec:
+  args:
+    - name: service
+    - name: canary-hash
+  metrics:
+    - name: ledger-integrity
+      interval: {{ $a.interval }}
+      count: 0
+      failureLimit: 0
+      successCondition: len(result) > 0 && result[0] == 1
+      provider:
+        prometheus:
+          address: {{ $a.prometheusAddress }}
+          query: min(tally_ledger_integrity_ok)

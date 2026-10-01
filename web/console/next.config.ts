@@ -6,6 +6,9 @@ const bff = process.env.TALLY_BFF_URL ?? "http://127.0.0.1:8040";
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  output: "standalone",
+  // Set at build time in AWS so hashed static assets load from CloudFront; unset locally.
+  assetPrefix: process.env.NEXT_PUBLIC_ASSET_ORIGIN || undefined,
   async rewrites() {
     return [
       { source: "/auth/:path*", destination: `${bff}/auth/:path*` },

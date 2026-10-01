@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -58,10 +59,14 @@ class S3ObjectStore:
         region: str = "ap-south-1",
         access_key: str | None = None,
         secret_key: str | None = None,
+        create_bucket: bool = True,
     ) -> None:
         import boto3
 
         self.bucket = bucket
+        # In AWS the bucket (with Object Lock and SSE-KMS) is owned by Terraform; pods only get
+        # object-level IAM permissions, so they must not list or create buckets.
+        self._create_bucket = create_bucket
         self._client: Any = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
@@ -73,6 +78,9 @@ class S3ObjectStore:
 
     async def _ensure_bucket(self) -> None:
         if self._ready:
+            return
+        if not self._create_bucket:
+            self._ready = True
             return
 
         def create() -> None:
@@ -108,3 +116,21 @@ class S3ObjectStore:
             self._client.list_objects_v2, Bucket=self.bucket, Prefix=prefix
         )
         return sorted(item["Key"] for item in response.get("Contents", []))
+
+
+def s3_store_from_env() -> S3ObjectStore | None:
+    """Local SeaweedFS when ``TALLY_S3_ENDPOINT`` is set; AWS S3 via IRSA when only a bucket is."""
+    endpoint = os.environ.get("TALLY_S3_ENDPOINT")
+    bucket = os.environ.get("TALLY_S3_BUCKET")
+    if endpoint:
+        return S3ObjectStore(
+            bucket or "tally-local",
+            endpoint_url=endpoint,
+            access_key=os.environ.get("TALLY_S3_ACCESS_KEY", "local"),
+            secret_key=os.environ.get("TALLY_S3_SECRET_KEY", "local"),
+        )
+    if bucket:
+        return S3ObjectStore(
+            bucket, region=os.environ.get("AWS_REGION", "ap-south-1"), create_bucket=False
+        )
+    return None

@@ -1,0 +1,54 @@
+{{- if .Values.ingress.enabled }}
+{{- $i := .Values.ingress }}
+{{- $d := .Values.global.domain }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tally
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tally.labels" (dict "root" $ "name" "") | nindent 4 }}
+  annotations:
+    {{- toYaml $i.annotations | nindent 4 }}
+    alb.ingress.kubernetes.io/group.name: tally-{{ .Values.global.environment }}
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    {{- with $i.certificateArn }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ . }}
+    {{- end }}
+    {{- with $i.wafAclArn }}
+    alb.ingress.kubernetes.io/wafv2-acl-arn: {{ . }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $i.className }}
+  tls:
+    - hosts:
+        - {{ $i.hosts.api }}.{{ $d }}
+        - {{ $i.hosts.console }}.{{ $d }}
+        - {{ $i.hosts.vault }}.{{ $d }}
+  rules:
+    - host: {{ $i.hosts.api }}.{{ $d }}
+      http:
+        paths:
+          # Only the merchant API; /internal and /metrics are never routed publicly.
+          - path: /v1
+            pathType: Prefix
+            {{- include "tally.backend" (dict "root" $ "name" "core") | nindent 12 }}
+    - host: {{ $i.hosts.console }}.{{ $d }}
+      http:
+        paths:
+          - path: /auth
+            pathType: Prefix
+            {{- include "tally.backend" (dict "root" $ "name" "backoffice") | nindent 12 }}
+          - path: /bff
+            pathType: Prefix
+            {{- include "tally.backend" (dict "root" $ "name" "backoffice") | nindent 12 }}
+          - path: /
+            pathType: Prefix
+            {{- include "tally.backend" (dict "root" $ "name" "web") | nindent 12 }}
+    - host: {{ $i.hosts.vault }}.{{ $d }}
+      http:
+        paths:
+          - path: /public/v1
+            pathType: Prefix
+            {{- include "tally.backend" (dict "root" $ "name" "vault") | nindent 12 }}
+{{- end }}

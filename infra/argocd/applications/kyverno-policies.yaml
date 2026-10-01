@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tally-kyverno-policies
+  namespace: argocd
+spec:
+  project: tally
+  source:
+    repoURL: https://github.com/rahilpathan27/tally
+    targetRevision: main
+    path: infra/k8s/policies
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [ServerSideApply=true]

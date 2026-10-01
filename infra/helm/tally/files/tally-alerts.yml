@@ -1,0 +1,151 @@
+# Every alert links to a runbook. severity=page wakes someone; severity=ticket is next business day.
+groups:
+  - name: tally-money
+    rules:
+      - alert: LedgerInvariantViolation
+        expr: min(tally_ledger_integrity_ok) == 0
+        labels: {severity: page}
+        annotations:
+          summary: "Ledger integrity check failing: {{ $labels.check }}"
+          description: "A ledger invariant (balanced entries, balances vs postings, hash chain or trial balance) failed. Treat as money at risk."
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/ledger-discrepancy.md
+      - alert: LedgerVerifierStalled
+        expr: increase(tally_ledger_integrity_runs_total[15m]) == 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "The ledger integrity verifier has not run for 15 minutes"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/ledger-discrepancy.md
+      - alert: PendingUnknownStuck
+        expr: tally_pending_unknown_oldest_age_seconds > 300
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "A payment has been in an unknown outcome for {{ $value | humanizeDuration }}"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/stuck-pending-unknown.md
+      - alert: RecoveryWorkerLag
+        expr: tally_recovery_lag_seconds > 60
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "Scheduled status checks are {{ $value | humanizeDuration }} overdue"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/stuck-pending-unknown.md
+      - alert: SettlementFailed
+        expr: increase(tally_settlement_failures_total[1h]) > 0 or increase(tally_payouts_returned_total[1h]) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "A settlement run failed or a payout was returned by the bank"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/failed-settlement.md
+  - name: tally-switch
+    rules:
+      - alert: BankSuccessRateDrop
+        expr: |
+          (sum by (bank) (rate(tally_bank_outcomes_total{outcome="approved"}[5m]))
+            / sum by (bank) (rate(tally_bank_outcomes_total[5m]))) < 0.8
+          and sum by (bank) (rate(tally_bank_outcomes_total[5m])) > 0.02
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "Bank {{ $labels.bank }} success rate is {{ $value | humanizePercentage }}"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/bank-outage.md
+      # The breaker half-opens after 5 s, so its state gauge flaps; alert on short-circuited calls.
+      - alert: CircuitBreakerOpen
+        expr: sum by (bank) (rate(tally_bank_outcomes_total{outcome="breaker_open"}[5m])) > 0
+        for: 1m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Payments to {{ $labels.bank }} are being short-circuited by the circuit breaker"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/bank-outage.md
+  - name: tally-recon-risk
+    rules:
+      - alert: ReconBreakSurge
+        expr: sum(tally_recon_open_breaks) > 20
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $value }} open reconciliation breaks"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/recon-break-surge.md
+      - alert: RiskLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(tally_risk_decision_duration_seconds_bucket[5m]))) > 0.05
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Risk decision p99 is {{ $value | humanizeDuration }} (budget 50 ms)"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/risk-service-failure.md
+      - alert: RiskServiceUnavailable
+        expr: sum(increase(tally_risk_unavailable_total[5m])) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "Payments are being decided by the fail-open/closed policy"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/risk-service-failure.md
+      - alert: ModelDrift
+        expr: max(tally_model_drift_psi) >= 0.2
+        labels: {severity: ticket}
+        annotations:
+          summary: "Feature drift PSI {{ $value }} on the champion model"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/suspected-fraud-wave.md
+      - alert: FraudWave
+        expr: |
+          sum(rate(tally_risk_decisions_total{decision=~"block|review"}[15m]))
+            / sum(rate(tally_risk_decisions_total[15m])) > 0.25
+          and sum(rate(tally_risk_decisions_total[15m])) > 0.05
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of payments blocked or reviewed"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/suspected-fraud-wave.md
+  - name: tally-platform
+    rules:
+      - alert: WebhookBacklog
+        expr: tally_webhook_oldest_pending_seconds > 900
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Oldest undelivered webhook is {{ $value | humanizeDuration }} old"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/webhook-backlog.md
+      - alert: OutboxBacklog
+        expr: tally_outbox_unpublished > 1000
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $value }} outbox events unpublished"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/webhook-backlog.md
+      # Merchant API availability SLO 99.9%: multi-window burn-rate alerts (fast and slow).
+      - alert: ErrorBudgetBurnFast
+        expr: |
+          (sum(rate(tally_http_requests_total{service="core",route=~"/v1/.*",status=~"5.."}[5m]))
+            / sum(rate(tally_http_requests_total{service="core",route=~"/v1/.*"}[5m]))) > (14.4 * 0.001)
+          and
+          (sum(rate(tally_http_requests_total{service="core",route=~"/v1/.*",status=~"5.."}[1h]))
+            / sum(rate(tally_http_requests_total{service="core",route=~"/v1/.*"}[1h]))) > (14.4 * 0.001)
+        labels: {severity: page}
+        annotations:
+          summary: "Merchant API is burning its monthly error budget 14x too fast"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/error-budget.md
+      - alert: ErrorBudgetBurnSlow
+        expr: |
+          (sum(rate(tally_http_requests_total{service="core",route=~"/v1/.*",status=~"5.."}[6h]))
+            / sum(rate(tally_http_requests_total{service="core",route=~"/v1/.*"}[6h]))) > (6 * 0.001)
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Merchant API error rate is consuming the error budget 6x too fast"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/error-budget.md
+      - alert: RefreshTokenReuse
+        expr: sum(increase(tally_auth_events_total{event="refresh_token_reuse"}[10m])) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "A rotated back-office refresh token was replayed (possible session theft)"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/security-event.md
+      - alert: LoginFailureSpike
+        expr: sum(increase(tally_auth_events_total{event="login_failed"}[10m])) > 20
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $value }} failed back-office logins in 10 minutes"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/security-event.md
+      - alert: CertificateExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) < 14 * 24 * 3600
+        labels: {severity: ticket}
+        annotations:
+          summary: "TLS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          runbook_url: https://github.com/rahilpathan27/tally/blob/main/docs/runbooks/certificate-expiry.md
