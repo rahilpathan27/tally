@@ -1,5 +1,31 @@
 # Guarantees and assumptions
 
+## Summary
+
+What Tally guarantees, how, the evidence, and where each guarantee stops. "Guarantee" here means
+an invariant the code enforces and the tests attack; it is not a certification, and it holds only
+for this simulation's components and assumptions.
+
+| Guarantee | Enforced by | Evidence | Holds unless |
+| --- | --- | --- | --- |
+| No money created or destroyed: every entry balances per currency, amounts are positive integers | `ledger_post_entry` checks inside PostgreSQL; float-ban on money code | ledger tests, mutation testing, 100k chaos, integrity verifier after every load and chaos run | a database owner/superuser bypasses the functions and triggers |
+| History is append-only and tamper-evident | update/delete triggers; SHA-256 chain over entries; continuous verifier and `LedgerInvariantViolation` alert | alert drill (tampering detected in 35 s), restore drill (hash-identical) | a privileged operator rewrites rows *and* the chain consistently; the ledger chain is not externally anchored (the staff audit log is) |
+| Balances never go below zero on non-negative accounts, counting active holds | per-account row locks in deterministic order | concurrency tests (200 opposite postings, no deadlock) | — |
+| A payment step's effect happens at most once, however often it is retried or replayed | idempotency by key and payload at the API, bank messages and ledger; deterministic keys | idempotency tests, crash-recovery tests, 100k chaos | a caller reuses a key for a genuinely different operation (rejected, not merged) |
+| A crash never leaves money moved without a record, or a record without the money | state change + transition log + outbox + ledger command in one transaction; sweeper and replay | crash at every named step boundary; on-cluster pod kills with a money audit | — |
+| An unknown external outcome is never guessed: recovery asks, ledger first; after the deadline the bank's configured policy applies and late truth is corrected visibly | recovery worker, per-bank policies, suspense corrections, reconciliation | 100k chaos (1,909 late successes corrected, 154 deemed-success mismatches flagged) | the deemed-success policy is chosen: then a mismatch is possible by design and reconciliation must catch it |
+| Refunds and disputes never exceed the payment | row lock on the payment under the merchant money lock | eight concurrent 60% refunds: exactly one succeeds | — |
+| Each settlement item is settled once; payouts match the ledger | idempotent settlement by date; netting proved by property tests | money-movement suite | — |
+| Every bank-side discrepancy surfaces as a reconciliation break | three-way matching with deterministic break IDs | 100% of 17,280 planted breaks found and classified | a discrepancy is invisible in all three sources |
+| Card numbers never reach the merchant or core | browser → vault tokenisation; only the network simulator may detokenise | vault tests, log scrubbing tests | — (only published test cards are accepted at all) |
+| One tenant cannot read another's data through the console | RLS on merchant roles, deny-by-default RBAC | tenant-isolation attacks via API and SQL | the core API and workers use the owner role (ADR-017) |
+| Money-moving staff actions need a second person | generic maker-checker | bypass attempts (self-approval, wrong role, double approval) | — |
+| Merchant requests are authentic and fresh | HMAC over method, path, body hash, timestamp, nonce; nonces consumed once | security tests | the merchant's secret leaks |
+| Under overload, admitted payments keep bounded latency | admission control, fast retryable 503 | spike test: p99 16.2 s → 2.1 s | — |
+
+Not guaranteed: real-rail behaviour, alternate-bank failover, throughput beyond ~120 payments/s
+on the test hardware, availability targets in a real cloud, regulatory compliance.
+
 ## PostgreSQL ledger
 
 Calls through `ledger_post_entry`, `ledger_place_hold`, `ledger_post_hold`, and `ledger_void_hold` commit atomically: related journal/hold changes and cached balances all commit, or none do. A committed posting has at least two positive integer minor-unit lines, balances in one currency, checks account currency and closed state, and rejects a non-negative account becoming negative after active holds. A repeated idempotency key and JSON payload returns the original result; changed JSON is rejected.
@@ -20,7 +46,7 @@ RLS policies read transaction-local `app.merchant_id`, which the application set
 
 ## Card vault
 
-The local vault accepts only PANs configured on its published-test allowlist that pass Luhn and expiry checks. Each PAN is AES-GCM encrypted under a fresh random data key, and that key is wrapped by a separately configured local KEK. The token is authenticated context for both layers. The database contains ciphertext and BIN/last4/expiry metadata; tokenization responses and validation errors do not echo PAN or CVV, and the API rejects CVV fields. A database audit function restricts detokenization to `network-simulator` and appends hash-chained immutable events. Tests verify these properties and that the vault database is attached only to an internal Compose network with a loopback-only published port.
+The local vault accepts only PANs configured on its published-test allowlist that pass Luhn and expiry checks. Each PAN is AES-GCM encrypted under a fresh random data key, and that key is wrapped by a separately configured local KEK. The token is authenticated context for both layers. The database contains ciphertext and BIN/last4/expiry metadata; tokenization responses and validation errors do not echo PAN or CVV, and the API rejects CVV fields. A database audit function restricts detokenization to `network-simulator` and appends hash-chained immutable events. Tests verify these properties and that no other Compose service shares a network with the vault database, whose published port is loopback-only (it joins a second, otherwise empty network because Docker Engine 29 no longer publishes ports for containers only on internal networks).
 
 This is a local simulation boundary. A static shared credential stands in for simulator mTLS, and the local KEK stands in for managed KMS. Compose networking and process-local access controls are not a production network security claim. Do not use real PAN or CVV.
 
@@ -99,4 +125,11 @@ defence); redirects are not followed. Local development can trust explicit hosts
 
 ## Verification
 
-The versioned ledger, gateway, vault, and core migrations pass against the local PostgreSQL 16 Compose services. Gateway, vault, and payment-flow integration tests run against local PostgreSQL, Redis, and simulator apps. `test_card_and_upi_happy_paths_and_illegal_transition_are_audited` covers direct card, payer PSP and bank declines; card response loss followed by hold recovery; late card authorization voiding; UPI lost response followed by success; auto-reversal after status deadline; late success corrected to suspense; configured deemed success; and debit-success/credit-failure with a lost reversal response. Unit tests cover simulator outage modes, idempotency, and circuit-breaker behavior. These checks cover the implemented local failure matrix; they do not claim alternate-bank failover, throughput, chaos safety, real-rail behavior, or production payment guarantees.
+The tables above are exercised by: ledger SQL integration tests and mutation testing; gateway,
+vault and payment-flow integration tests (card, PSP and bank declines; lost responses; late
+authorisation voiding; auto-reversal; late success to suspense; deemed success; credit-leg failure
+with a lost reversal); crash-recovery tests at every named step boundary; the money-movement,
+reconciliation, risk and security suites; 100,000 full-flow chaos scenarios; and, on a local
+Kubernetes cluster, the canary drill, on-cluster chaos with a money audit, load tests with
+post-run correctness checks and a backup/PITR drill. Results and hardware are in the
+[reports](../README.md#documentation) and [PROGRESS](PROGRESS.md).

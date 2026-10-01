@@ -11,6 +11,9 @@ Every request carries `x-tally-key-id`, `x-tally-timestamp`, `x-tally-nonce` and
 `x-tally-signature` (HMAC-SHA256 over method, raw path+query, body SHA-256, timestamp, nonce).
 Mutations require `Idempotency-Key`; 2xx and 4xx responses are replayed for the same key and
 payload, 5xx releases the key for retry, and a changed payload returns `422`.
+Rate limits (per merchant, default 120 requests/minute) return `429 RATE_LIMITED`. When a core
+pod is at its in-flight cap it returns `503 OVERLOADED` with `Retry-After`; retry with the same
+idempotency key.
 
 | Method and path | Scope | Purpose |
 | --- | --- | --- |
